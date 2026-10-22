@@ -1,0 +1,9 @@
+# The dsh-ptc-moejs bundle layer: it mounts the moejs PTC runtime as a
+# disabled row, so installing the package changes nothing on its own. A
+# profile selects it with a patch that disables the ptc-runtime row (the Node
+# runtime) and enables this one; see the README.
+
+- insert:
+    - id: ptc-moejs
+      name: dsh-ptc-moejs
+      disabled: true

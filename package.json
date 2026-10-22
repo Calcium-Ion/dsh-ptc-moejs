@@ -1,0 +1,78 @@
+{
+  "name": "dsh-ptc-moejs",
+  "version": "0.1.0",
+  "description": "PTC runtime for the DeepSeek Harness that runs model-written programs in moejs, a pure-Go JavaScript engine, inside one long-lived sidecar process",
+  "keywords": [
+    "dsh-plugin",
+    "dsh",
+    "deepseek-harness",
+    "ptc",
+    "moejs",
+    "javascript",
+    "typescript"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Calcium-Ion/dsh-ptc-moejs.git"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.d.ts",
+    "cordis.patch.yml",
+    "README.zh_CN.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "build:sidecar": "node scripts/build-binaries.mjs --host",
+    "build:binaries": "node scripts/build-binaries.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:go": "go test ./...",
+    "e2e": "node e2e/run.mjs",
+    "bench": "node bench/bench.mjs",
+    "prepack": "pnpm run build"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/dsh-ptc-runtime": ">=0.2.1-rc.2 <0.3.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-util-values": ">=0.2.1-rc.2 <0.3.0",
+    "@deepseek-ai/schemastery": "~3.18.5"
+  },
+  "optionalDependencies": {
+    "dsh-ptc-moejs-darwin-arm64": "workspace:*",
+    "dsh-ptc-moejs-darwin-x64": "workspace:*",
+    "dsh-ptc-moejs-linux-arm64": "workspace:*",
+    "dsh-ptc-moejs-linux-x64": "workspace:*",
+    "dsh-ptc-moejs-win32-x64": "workspace:*"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/dsh-ptc-runtime": "0.2.1-rc.2",
+    "@types/node": "^22.20.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  },
+  "packageManager": "pnpm@11.28.5"
+}

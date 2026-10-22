@@ -1,0 +1,6 @@
+node_modules/
+lib/
+npm/*/bin/
+*.tgz
+npm/*/LICENSE
+npm/*/THIRD_PARTY_NOTICES.md

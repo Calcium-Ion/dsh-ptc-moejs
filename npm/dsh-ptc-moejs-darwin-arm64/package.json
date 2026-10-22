@@ -1,0 +1,14 @@
+{
+  "name": "dsh-ptc-moejs-darwin-arm64",
+  "version": "0.1.0",
+  "description": "The darwin-arm64 sidecar binary of dsh-ptc-moejs",
+  "license": "MIT AND Apache-2.0 AND BSD-3-Clause",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Calcium-Ion/dsh-ptc-moejs.git"
+  },
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "files": ["bin/moejs-ptc", "THIRD_PARTY_NOTICES.md"],
+  "preferUnplugged": true
+}
