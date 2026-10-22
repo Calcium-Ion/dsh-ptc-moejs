@@ -158,6 +158,8 @@ export class MoejsPtcRuntime extends PtcRuntime {
       + 'Top-level await and return are supported. '
       + 'The program runs in moejs with the JavaScript standard library, the tool bindings and console.log, info, warn, error and debug. '
       + 'Node APIs, require, import, process, timers and direct file or network access are absent: use the tools for files, commands and the network. '
+      + 'run_code takes no sandbox_permissions or justification with this runtime. '
+      + 'When the sandbox denies a tool call, retry that call with sandbox_permissions and justification in its own arguments. The user approves each such call. '
       + 'Emit output with console.log(...) or return a lossless JSON value: plain objects, arrays, strings, finite numbers, booleans and null. '
       + 'Only printed values and the returned value become program output. '
       + `Each call starts a fresh runtime that may allocate ${this.config.memoryLimitMb} MiB in total, and variables from earlier calls are gone.`

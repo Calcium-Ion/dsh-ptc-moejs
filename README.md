@@ -18,6 +18,8 @@ Programs are TypeScript with erasable syntax, the rule dsh's Node runtime applie
 
 Programs get the JavaScript standard library and the tools. Node's APIs are absent: `require`, `import`, `process`, `Buffer`, `fs` and `setTimeout` are undefined in a program. A program that needs a file asks the `read` tool for it. If your programs use Node APIs, keep dsh's Node runtime for that profile.
 
+A program has no sandbox of its own, so `run_code` takes no `sandbox_permissions`. When the file sandbox denies a tool call, the program retries that call with `sandbox_permissions` and `justification` among its arguments, and you approve each such call. With the Node runtime one approval can also cover the file operations a program does itself through Node APIs.
+
 ## Install
 
 ```sh

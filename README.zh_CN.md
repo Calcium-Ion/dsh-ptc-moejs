@@ -18,6 +18,8 @@ dsh-ptc-moejs 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-har
 
 程序能用 JavaScript 标准库和工具。Node 的 API 在程序里都是 undefined，包括 `require`、`import`、`process`、`Buffer`、`fs` 和 `setTimeout`。程序要读文件时调用 `read` 工具。如果你的程序要用 Node API，这个 profile 继续用 dsh 的 Node 运行时。
 
+程序自己没有沙箱，所以 `run_code` 不接受 `sandbox_permissions`。文件沙箱拒绝某次工具调用时，程序在这次调用的参数里带上 `sandbox_permissions` 和 `justification` 重试，每次这样的调用都要你批准。用 Node 运行时的话，程序通过 Node API 自己做的文件操作还能用一次批准全部放行。
+
 ## 安装
 
 ```sh

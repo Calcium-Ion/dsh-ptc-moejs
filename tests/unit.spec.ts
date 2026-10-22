@@ -107,6 +107,8 @@ describe('resolve', () => {
     expect(runtime.programFormat).toBe('function-body')
     expect(runtime.sandboxMode).toBeUndefined()
     expect(runtime.executionInstructions).toContain('Node APIs, require, import, process, timers and direct file or network access are absent')
+    expect(runtime.executionInstructions).toContain('run_code takes no sandbox_permissions or justification')
+    expect(runtime.executionInstructions).toContain('retry that call with sandbox_permissions and justification in its own arguments')
     expect(runtime.executionInstructions).toContain('256 MiB')
   })
 })
