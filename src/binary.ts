@@ -10,6 +10,18 @@ import { createRequire } from 'node:module'
 export const PLATFORMS = ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-x64'] as const
 
 /**
+ * Name the package that holds the sidecar binary for a platform.
+ * npm's spam filter rejects the name dsh-ptc-moejs-win32-x64, so the
+ * Windows package says "windows" where Node says "win32".
+ * @param platform - the Node platform name.
+ * @param arch - the Node architecture name.
+ * @returns the npm package name.
+ */
+export function binaryPackage(platform: string, arch: string): string {
+  return `dsh-ptc-moejs-${platform === 'win32' ? 'windows' : platform}-${arch}`
+}
+
+/**
  * Resolve the sidecar binary for this platform.
  * @param platform - the Node platform name.
  * @param arch - the Node architecture name.
@@ -18,7 +30,7 @@ export const PLATFORMS = ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x6
  */
 export function resolveBinary(platform: string = process.platform, arch: string = process.arch): string {
   const target = `${platform}-${arch}`
-  const pkg = `dsh-ptc-moejs-${target}`
+  const pkg = binaryPackage(platform, arch)
   try {
     return createRequire(import.meta.url).resolve(`${pkg}/bin/moejs-ptc${platform === 'win32' ? '.exe' : ''}`)
   } catch {

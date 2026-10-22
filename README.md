@@ -138,7 +138,7 @@ The returned value goes back to dsh as lossless JSON: plain objects, arrays, str
 - `console` output imitates Node's `util.inspect` for strings, numbers, plain objects, arrays, `Map`, `Set`, errors and class instances, and breaks a line at 72 characters.
 - moejs interrupts running JavaScript, and a compile runs to its end once it starts. A program that takes long to parse still ends at its deadline for dsh, and the sidecar drops the run once the parse returns.
 - If a tool call that the program never awaits fails, the failure stays in that unread promise.
-- This version has been tested on Linux x64. The other four binaries are cross-compiled from the same source.
+- CI runs the tests on Linux x64, Linux arm64, macOS arm64 and Windows x64 for every push. macOS x64 is untested: its binary is cross-compiled from the same source.
 
 ## Development
 

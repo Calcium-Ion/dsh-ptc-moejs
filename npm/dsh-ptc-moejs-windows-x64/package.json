@@ -1,7 +1,7 @@
 {
-  "name": "dsh-ptc-moejs-win32-x64",
+  "name": "dsh-ptc-moejs-windows-x64",
   "version": "0.1.0",
-  "description": "The win32-x64 sidecar binary of dsh-ptc-moejs",
+  "description": "The Windows x64 sidecar binary of dsh-ptc-moejs",
   "license": "MIT AND Apache-2.0 AND BSD-3-Clause",
   "repository": {
     "type": "git",

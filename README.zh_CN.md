@@ -138,7 +138,7 @@ return { head: head.stdout?.text };
 - `console` 的输出仿照 Node 的 `util.inspect`，覆盖字符串、数字、普通对象、数组、`Map`、`Set`、错误和类的实例，单行超过 72 个字符时换行。
 - moejs 的中断作用于正在运行的 JavaScript，编译一旦开始会一直进行到结束。解析很慢的程序到截止时间时，dsh 一侧照常结束这次运行，sidecar 等解析返回后丢弃它。
 - 程序没有 await 的工具调用如果失败，这个失败只留在那个没人读取的 promise 里。
-- 这个版本在 Linux x64 上测试过。其余四个平台的程序由同一份源码交叉编译。
+- CI 每次推送都在 Linux x64、Linux arm64、macOS arm64 和 Windows x64 上跑测试。macOS x64 还没测过，它的程序由同一份源码交叉编译。
 
 ## 开发
 

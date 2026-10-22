@@ -65,7 +65,7 @@
     "dsh-ptc-moejs-darwin-x64": "workspace:*",
     "dsh-ptc-moejs-linux-arm64": "workspace:*",
     "dsh-ptc-moejs-linux-x64": "workspace:*",
-    "dsh-ptc-moejs-win32-x64": "workspace:*"
+    "dsh-ptc-moejs-windows-x64": "workspace:*"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "~4.0.5",

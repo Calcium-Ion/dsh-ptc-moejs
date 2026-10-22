@@ -13,7 +13,8 @@ const targets = [
   { name: 'darwin-x64', goos: 'darwin', goarch: 'amd64' },
   { name: 'linux-arm64', goos: 'linux', goarch: 'arm64' },
   { name: 'linux-x64', goos: 'linux', goarch: 'amd64' },
-  { name: 'win32-x64', goos: 'windows', goarch: 'amd64' },
+  // npm's spam filter rejects dsh-ptc-moejs-win32-x64, so this package says "windows".
+  { name: 'win32-x64', pkg: 'windows-x64', goos: 'windows', goarch: 'amd64' },
 ]
 
 const host = `${process.platform}-${process.arch}`
@@ -22,7 +23,7 @@ if (selected.length === 0) throw new Error(`no sidecar target for ${host}`)
 
 for (const target of selected) {
   const binary = target.goos === 'windows' ? 'moejs-ptc.exe' : 'moejs-ptc'
-  const dir = join(root, 'npm', `dsh-ptc-moejs-${target.name}`)
+  const dir = join(root, 'npm', `dsh-ptc-moejs-${target.pkg ?? target.name}`)
   const output = join(dir, 'bin', binary)
   execFileSync('go', ['build', '-trimpath', '-ldflags=-s -w', '-o', output, './cmd/moejs-ptc'], {
     cwd: root,

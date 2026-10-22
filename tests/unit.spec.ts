@@ -1,7 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import type { PtcBindingNamespace } from '@deepseek-ai/dsh-ptc-runtime'
 import { describe, expect, it, onTestFinished } from 'vitest'
-import { resolveBinary } from '../src/binary.ts'
+import { binaryPackage, resolveBinary } from '../src/binary.ts'
 import MoejsPtcRuntime, { resolveConfig, validateBindings } from '../src/index.ts'
 import type { Config } from '../src/index.ts'
 import { LogLedger, TRUNCATION_MARKER, capMessage, failureResult, jsonBytes, parseFrame, successResult } from '../src/protocol.ts'
@@ -259,5 +259,10 @@ describe('resolveBinary', () => {
   it('names the package that is missing and the supported platforms', () => {
     expect(() => resolveBinary('aix', 'ppc64')).toThrow('no sidecar binary for aix-ppc64 (supported: darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-x64)')
     expect(() => resolveBinary('freebsd', 'x64')).toThrow('no sidecar binary for freebsd-x64')
+  })
+
+  it('names the Windows package windows-x64', () => {
+    expect(binaryPackage('win32', 'x64')).toBe('dsh-ptc-moejs-windows-x64')
+    expect(binaryPackage('linux', 'arm64')).toBe('dsh-ptc-moejs-linux-arm64')
   })
 })

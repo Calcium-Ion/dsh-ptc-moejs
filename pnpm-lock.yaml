@@ -43,9 +43,9 @@ importers:
       dsh-ptc-moejs-linux-x64:
         specifier: workspace:*
         version: link:npm/dsh-ptc-moejs-linux-x64
-      dsh-ptc-moejs-win32-x64:
+      dsh-ptc-moejs-windows-x64:
         specifier: workspace:*
-        version: link:npm/dsh-ptc-moejs-win32-x64
+        version: link:npm/dsh-ptc-moejs-windows-x64
 
   npm/dsh-ptc-moejs-darwin-arm64: {}
 
@@ -55,7 +55,7 @@ importers:
 
   npm/dsh-ptc-moejs-linux-x64: {}
 
-  npm/dsh-ptc-moejs-win32-x64: {}
+  npm/dsh-ptc-moejs-windows-x64: {}
 
 packages:
 
