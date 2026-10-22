@@ -1,6 +1,6 @@
 {
   "name": "dsh-ptc-moejs",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "PTC runtime for the DeepSeek Harness that runs model-written programs in moejs, a pure-Go JavaScript engine, inside one long-lived sidecar process",
   "keywords": [
     "dsh-plugin",
