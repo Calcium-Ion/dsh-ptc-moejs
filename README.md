@@ -2,25 +2,11 @@
 
 [简体中文](README.zh_CN.md)
 
-dsh-ptc-moejs is a PTC runtime for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh). In PTC mode the model answers with a TypeScript program that calls tools, and dsh hands that program to the loaded runtime. This runtime runs each program in [moejs](https://github.com/Calcium-Ion/moejs), a JavaScript engine written in Go, inside one sidecar process that the plugin starts when it loads.
+A PTC runtime for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh). It runs the model's programs in [moejs](https://github.com/Calcium-Ion/moejs), a JavaScript engine written in Go.
 
-## Why use it
+In dsh's PTC mode the model answers with a TypeScript program that calls tools, and dsh hands that program to the loaded runtime. A run of three tool calls takes 0.18 ms here; dsh's Node runtime takes 95 ms for the same program (see [Measurements](#measurements)). Each run gets a fresh moejs runtime inside one sidecar process, which stays up between runs, and a memory budget, 512 MiB by default; a deadline or an abort stops a run at once, an endless loop included. The sidecar is a static Go binary that dsh starts as a plain child process. Starting that process is all the runtime asks of the host, so it also works in containers where bubblewrap cannot run.
 
-A program in this runtime can call the tools dsh gives it and write to `console`. To read a file or run a command it calls a tool, and each tool call goes through dsh's tool pipeline with that tool's own policy, approvals and sandbox, as it does with the Node runtime. Every effect a program has on the machine is one of those tool calls. The sidecar is a static Go binary that dsh starts as a plain child process. Starting that process is all the runtime asks of the host, so it also works in containers where bubblewrap cannot run.
-
-Each run gets a fresh moejs runtime inside the sidecar, which stays up between runs. A run of three tool calls takes 0.18 ms here. dsh's Node runtime starts a Node process for every call and takes 95 ms for the same program (see [Measurements](#measurements)).
-
-Each run has a memory budget, 512 MiB by default. A deadline or an abort stops a run at once, an endless loop included.
-
-Programs are TypeScript with erasable syntax, the rule dsh's Node runtime applies: the types are removed, and `enum`, namespaces with values and parameter properties are syntax errors.
-
-## The trade-off
-
-Programs get the JavaScript standard library and the tools. Node's APIs are absent: `require`, `import`, `process`, `Buffer`, `fs` and `setTimeout` are undefined in a program. A program that needs a file asks the `read` tool for it. If your programs use Node APIs, keep dsh's Node runtime for that profile.
-
-A program has no sandbox of its own, so `run_code` takes no `sandbox_permissions`. When the file sandbox denies a tool call, the program retries that call with `sandbox_permissions` and `justification` among its arguments, and you approve each such call. With the Node runtime one approval can also cover the file operations a program does itself through Node APIs.
-
-## Install
+## Quick start
 
 ```sh
 dsh plugin --profile web add dsh-ptc-moejs
@@ -68,9 +54,26 @@ Options go on the `ptc-moejs` row of the same patch:
 
 The deadline defaults follow dsh's Node runtime. dsh spills tool results longer than 12,500 tokens to a file, so the log and value budgets are limits on memory use.
 
+## How it works
+
+A program in this runtime can call the tools dsh gives it and write to `console`. To read a file or run a command it calls a tool, and each tool call goes through dsh's tool pipeline with that tool's own policy, approvals and sandbox, as it does with the Node runtime. Every effect a program has on the machine is one of those tool calls.
+
 ## What a program sees
 
-A program is the body of an async function, so `await` and `return` work at its top level. The function's parameters are the binding namespaces dsh passes (`tools` in PTC mode), the error class of each namespace (`ToolCallError`, which carries the tool's name in `toolName`) and `console` with `log`, `info`, `warn`, `error` and `debug`. The rest is the JavaScript standard library, which in moejs includes `TextEncoder`, `TextDecoder`, `atob`, `btoa`, `structuredClone` and `queueMicrotask`.
+A program is the body of an async function, so `await` and `return` work at its top level. The function's parameters are the binding namespaces dsh passes (`tools` in PTC mode), the error class of each namespace (`ToolCallError`, which carries the tool's name in `toolName`) and `console` with `log`, `info`, `warn`, `error` and `debug`.
+
+Programs are TypeScript with erasable syntax, the rule dsh's Node runtime applies: the types are removed, and `enum`, namespaces with values and parameter properties are syntax errors.
+
+The rest is the JavaScript standard library, which in moejs includes `TextEncoder`, `TextDecoder`, `atob`, `btoa`, `structuredClone` and `queueMicrotask`. Node's APIs are absent: `require`, `import`, `process`, `Buffer`, `fs` and `setTimeout` are undefined in a program. A program that needs a file asks the `read` tool for it. If your programs use Node APIs, keep dsh's Node runtime for that profile.
+
+The program has no sandbox of its own, so `run_code` takes no `sandbox_permissions` argument. When the file sandbox denies a tool call, the program retries that call with `sandbox_permissions` and `justification` among the arguments, and each such call asks you for approval. On the Node runtime, the file operations a program performs itself through Node APIs can be approved once for the whole run.
+
+A run looks like this. The model writes the body; the runtime executes it and hands the returned value to dsh:
+
+```ts
+const head = await tools.bash({ description: "Read the last commit", command: "git log -1 --oneline" });
+return { head: head.stdout?.text };
+```
 
 The returned value goes back to dsh as lossless JSON: plain objects, arrays, strings, finite numbers, booleans and `null`. A value that holds `undefined`, a function, a `BigInt`, a cycle, `NaN`, `Infinity`, `-0`, a `Date`, a `Map` or a class instance fails the run with `invalid-output`, and the message gives the path of the first such member, for example `a BigInt at $.items[3].size`. A program that returns nothing completes with no value. Tool arguments follow the same rule, and a call with arguments that are not lossless JSON rejects inside the program before dsh sees it.
 

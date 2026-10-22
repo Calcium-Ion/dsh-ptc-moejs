@@ -2,25 +2,11 @@
 
 [English](README.md)
 
-dsh-ptc-moejs 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）的 PTC 运行时。PTC 模式下，模型给出一段调用工具的 TypeScript 程序，dsh 把程序交给当前加载的运行时执行。这个运行时把每段程序放在 [moejs](https://github.com/Calcium-Ion/moejs) 里运行。moejs 是用 Go 写的 JavaScript 引擎，跑在插件加载时启动的一个 sidecar 进程中。
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）的 PTC 运行时，用 Go 写的 JavaScript 引擎 [moejs](https://github.com/Calcium-Ion/moejs) 运行模型的程序。
 
-## 为什么用它
+dsh 的 PTC 模式下，模型给出一段调用工具的 TypeScript 程序，dsh 把程序交给当前加载的运行时执行。这个运行时把程序放进 [moejs](https://github.com/Calcium-Ion/moejs) 里运行。调用三次工具的程序在这里一次运行用时 0.18 ms，dsh 的 Node 运行时跑同样的程序用时 95 ms（见[测量](#测量)）。每次运行都在一个 sidecar 进程里新建 moejs 运行时，sidecar 在多次运行之间一直保留；每次运行还有内存预算，默认 512 MiB，截止时间到了或者被中止时运行立即停止，死循环也一样。sidecar 是静态链接的 Go 程序，dsh 把它当作普通子进程启动。运行时对宿主机的要求就是能启动这个进程，所以在无法运行 bubblewrap 的容器里也能用。
 
-程序能调用 dsh 提供的工具，能向 `console` 输出。读文件、执行命令都要调用工具，每次工具调用都走 dsh 的工具流水线，由该工具自己的策略、审批和沙箱处理，和 Node 运行时一样。程序对机器的每一次影响都是这样一次工具调用。sidecar 是静态链接的 Go 程序，dsh 把它当作普通子进程启动。运行时对宿主机的要求就是能启动这个进程，所以在无法运行 bubblewrap 的容器里也能用。
-
-每次运行都在 sidecar 里新建一个 moejs 运行时，sidecar 进程在多次运行之间一直保留。调用三次工具的程序在这里一次运行用时 0.18 ms。dsh 的 Node 运行时每次调用都启动一个 Node 进程，同样的程序用时 95 ms（见[测量](#测量)）。
-
-每次运行有内存预算，默认 512 MiB。截止时间到了或者被中止时，运行立即停止，死循环也一样。
-
-程序是只用可擦除语法的 TypeScript，规则和 dsh 的 Node 运行时相同：类型标注被删掉，`enum`、带值的 namespace 和参数属性都是语法错误。
-
-## 代价
-
-程序能用 JavaScript 标准库和工具。Node 的 API 在程序里都是 undefined，包括 `require`、`import`、`process`、`Buffer`、`fs` 和 `setTimeout`。程序要读文件时调用 `read` 工具。如果你的程序要用 Node API，这个 profile 继续用 dsh 的 Node 运行时。
-
-程序自己没有沙箱，所以 `run_code` 不接受 `sandbox_permissions`。文件沙箱拒绝某次工具调用时，程序在这次调用的参数里带上 `sandbox_permissions` 和 `justification` 重试，每次这样的调用都要你批准。用 Node 运行时的话，程序通过 Node API 自己做的文件操作还能用一次批准全部放行。
-
-## 安装
+## 快速开始
 
 ```sh
 dsh plugin --profile web add dsh-ptc-moejs
@@ -68,9 +54,26 @@ dsh plugin --profile web add dsh-ptc-moejs
 
 截止时间的默认值和 dsh 的 Node 运行时一致。dsh 会把超过 12,500 token 的工具结果转存到文件，所以日志和返回值的预算用来限制内存占用。
 
+## 工作方式
+
+程序能调用 dsh 提供的工具，能向 `console` 输出。读文件、执行命令都要调用工具，每次工具调用都走 dsh 的工具流水线，由该工具自己的策略、审批和沙箱处理，和 Node 运行时一样。程序对机器的每一次影响都是这样一次工具调用。
+
 ## 程序能看到什么
 
-程序是一个 async 函数的函数体，顶层可以用 `await` 和 `return`。函数的参数有 dsh 传入的绑定命名空间（PTC 模式下是 `tools`）、每个命名空间的错误类（`ToolCallError`，`toolName` 属性里是工具名），以及带 `log`、`info`、`warn`、`error`、`debug` 的 `console`。其余是 JavaScript 标准库，moejs 的标准库里有 `TextEncoder`、`TextDecoder`、`atob`、`btoa`、`structuredClone` 和 `queueMicrotask`。
+程序是一个 async 函数的函数体，顶层可以用 `await` 和 `return`。函数的参数有 dsh 传入的绑定命名空间（PTC 模式下是 `tools`）、每个命名空间的错误类（`ToolCallError`，`toolName` 属性里是工具名），以及带 `log`、`info`、`warn`、`error`、`debug` 的 `console`。
+
+程序是只用可擦除语法的 TypeScript，规则和 dsh 的 Node 运行时相同：类型标注被删掉，`enum`、带值的 namespace 和参数属性都是语法错误。
+
+其余是 JavaScript 标准库，moejs 的标准库里有 `TextEncoder`、`TextDecoder`、`atob`、`btoa`、`structuredClone` 和 `queueMicrotask`。Node 的 API 在程序里都是 undefined，包括 `require`、`import`、`process`、`Buffer`、`fs` 和 `setTimeout`。程序要读文件时调用 `read` 工具。如果你的程序要用 Node API，这个 profile 继续用 dsh 的 Node 运行时。
+
+程序自己没有沙箱，所以 `run_code` 不接受 `sandbox_permissions`。文件沙箱拒绝某次工具调用时，程序在这次调用的参数里带上 `sandbox_permissions` 和 `justification` 重试，每次这样的调用都要你批准。用 Node 运行时的话，程序通过 Node API 自己做的文件操作还能用一次批准全部放行。
+
+一次运行是这样的。函数体由模型写，运行时执行它，并把返回值交给 dsh：
+
+```ts
+const head = await tools.bash({ description: "Read the last commit", command: "git log -1 --oneline" });
+return { head: head.stdout?.text };
+```
 
 返回值以无损 JSON 的形式交给 dsh：普通对象、数组、字符串、有限数字、布尔值和 `null`。值里含有 `undefined`、函数、`BigInt`、循环引用、`NaN`、`Infinity`、`-0`、`Date`、`Map` 或类的实例时，运行以 `invalid-output` 失败，消息给出第一个这样的成员的路径，例如 `a BigInt at $.items[3].size`。程序没有返回值时，运行正常结束，结果里没有值。工具参数遵守同样的规则，参数不是无损 JSON 的调用在发给 dsh 之前就在程序内部被拒绝。
 
