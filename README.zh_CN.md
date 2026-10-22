@@ -1,12 +1,65 @@
+<div align="center">
+
+<img src="https://raw.githubusercontent.com/Calcium-Ion/moejs/main/docs/assets/moejs-logo.svg" width="160" alt="moejs">
+
 # dsh-ptc-moejs
 
-[English](README.md)
+DeepSeek Harness 的 PTC 运行时，用 Go 写的 JavaScript 引擎 moejs 运行模型写的程序。
 
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）的 PTC 运行时，用 Go 写的 JavaScript 引擎 [moejs](https://github.com/Calcium-Ion/moejs) 运行模型的程序。
+<p align="center">
+  <strong>简体中文</strong> |
+  <a href="./README.md">English</a>
+</p>
 
-dsh 的 PTC 模式下，模型给出一段调用工具的 TypeScript 程序，dsh 把程序交给当前加载的运行时执行。这个运行时把程序放进 [moejs](https://github.com/Calcium-Ion/moejs) 里运行。调用三次工具的程序在这里一次运行用时 0.18 ms，dsh 的 Node 运行时跑同样的程序用时 95 ms（见[测量](#测量)）。每次运行都在一个 sidecar 进程里新建 moejs 运行时，sidecar 在多次运行之间一直保留；每次运行还有内存预算，默认 512 MiB，截止时间到了或者被中止时运行立即停止，死循环也一样。sidecar 是静态链接的 Go 程序，dsh 把它当作普通子进程启动。运行时对宿主机的要求就是能启动这个进程，所以在无法运行 bubblewrap 的容器里也能用。
+</div>
 
-## 快速开始
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）的 PTC 模式下，模型给出一段调用工具的 TypeScript 程序。这个运行时让一个 sidecar 进程常驻，每段程序在里面拿到一个新的 [moejs](https://github.com/Calcium-Ion/moejs) 运行时。调用三次工具的程序在这里用时 0.18 ms。dsh 的 Node 运行时每段程序都要启动一个 Node 进程，同样的程序用时 95 ms。
+
+程序对机器做的每件事都是一次工具调用，dsh 按该工具自己的策略、审批和沙箱执行这次调用。运行到了截止时间就会停下，死循环里也一样，分配的内存超过预算时也会停下。sidecar 是静态链接的 Go 程序，dsh 把它当作普通子进程启动，所以在无法运行 bubblewrap 的容器里也能用。
+
+## 性能
+
+两个运行时通过 dsh 的 `PtcRuntime` 服务接口运行同一段程序：三次工具调用，每次由绑定函数立即返回，最后返回一个对象。
+
+| 运行时 | 每次调用 | 从加载到第一个结果 |
+|---|--:|--:|
+| dsh-ptc-moejs | 0.18 ms | 5.8 ms |
+| dsh-ptc-runtime-node，workspace-write | 94.8 ms | 131.7 ms |
+| dsh-ptc-runtime-node，danger-full-access | 91.2 ms | 135.0 ms |
+
+一次调用是一次 `resolve` 加一次 `run`，从程序文本到结果。从加载到第一个结果是从挂载插件到第一次运行结束，moejs 的这段时间包含启动 sidecar。workspace-write 是 dsh 会话的默认文件策略，这时 Node 运行时在 bubblewrap 里启动每段程序。danger-full-access 下直接启动。
+
+每一轮里，每个运行时都在新的 Node 进程中启动。5 轮交替顺序运行，绑定在 Intel Core i5-13500H 的 8 个核上，环境是 Linux 6.18、Node 24.22.1、Go 1.26.6、dsh 0.2.1-rc.2 和 moejs v0.1.0-alpha.9。表中是各轮中位数的中位数，moejs 的各轮中位数在 0.16 到 0.20 ms 之间，Node 在 90 到 96 ms 之间。
+
+## 功能
+
+### 对机器的每次操作都是工具调用
+
+程序能调用 dsh 提供的工具，能向 `console` 输出。读文件、执行命令、抓取网页都要调用工具，dsh 用工具流水线执行这次调用，由该工具自己的策略、审批和沙箱处理，和 Node 运行时一样。dsh 的会话日志记录每一次调用。
+
+### 每次运行一个新运行时
+
+sidecar 在插件加载时启动，之后一直运行。每次运行拿到自己的 moejs 运行时，每段程序都从干净的全局环境开始，同一个 sidecar 里可以同时进行多次运行。
+
+### 每次运行都有上限
+
+一次运行默认可以分配 512 MiB，垃圾也算在内。截止时间到了、dsh 中止或者 profile 关闭时，运行立即停止。console 输出、返回值和发给 sidecar 的每条消息各有大小上限，见[配置](#配置)。
+
+### 和 Node 运行时一样的 TypeScript
+
+程序是只用可擦除语法的 TypeScript，规则和 dsh 的 Node 运行时相同：类型标注被删掉，`enum`、带值的 namespace 和参数属性都是语法错误。程序是一个 async 函数的函数体，顶层可以用 `await` 和 `return`。
+
+### 一个静态程序
+
+sidecar 是用 `CGO_ENABLED=0` 构建的自包含 Go 程序。dsh 把它当作普通子进程启动，运行时对宿主机的要求就是能启动这个进程。包管理器以可选依赖的形式安装对应平台的程序。
+
+## 和 Node 运行时的区别
+
+程序能用 JavaScript 标准库和工具。`require`、`import`、`process`、`Buffer`、`fs` 和 `setTimeout` 在程序里都是 undefined，程序要读文件时调用 `read` 工具。如果你的程序要用 Node API，这个 profile 继续用 dsh 的 Node 运行时。
+
+程序的每次文件访问都发生在工具调用里，带 `sandbox_permissions` 的 `run_code` 调用会被 dsh 拒绝。文件沙箱拒绝某次工具调用时，程序在这次调用的参数里带上 `sandbox_permissions` 和 `justification` 重试，每次这样的调用都要你批准。用 Node 运行时的话，程序通过 Node API 自己做的文件操作还能用一次批准全部放行。
+
+## 快速上手
 
 ```sh
 dsh plugin --profile web add dsh-ptc-moejs
@@ -54,21 +107,11 @@ dsh plugin --profile web add dsh-ptc-moejs
 
 截止时间的默认值和 dsh 的 Node 运行时一致。dsh 会把超过 12,500 token 的工具结果转存到文件，所以日志和返回值的预算用来限制内存占用。
 
-## 工作方式
-
-程序能调用 dsh 提供的工具，能向 `console` 输出。读文件、执行命令都要调用工具，每次工具调用都走 dsh 的工具流水线，由该工具自己的策略、审批和沙箱处理，和 Node 运行时一样。程序对机器的每一次影响都是这样一次工具调用。
-
 ## 程序能看到什么
 
-程序是一个 async 函数的函数体，顶层可以用 `await` 和 `return`。函数的参数有 dsh 传入的绑定命名空间（PTC 模式下是 `tools`）、每个命名空间的错误类（`ToolCallError`，`toolName` 属性里是工具名），以及带 `log`、`info`、`warn`、`error`、`debug` 的 `console`。
+程序是一个 async 函数的函数体。函数的参数有 dsh 传入的绑定命名空间（PTC 模式下是 `tools`）、每个命名空间的错误类（`ToolCallError`，`toolName` 属性里是工具名），以及带 `log`、`info`、`warn`、`error`、`debug` 的 `console`。其余是 JavaScript 标准库，moejs 的标准库里有 `TextEncoder`、`TextDecoder`、`atob`、`btoa`、`structuredClone` 和 `queueMicrotask`。
 
-程序是只用可擦除语法的 TypeScript，规则和 dsh 的 Node 运行时相同：类型标注被删掉，`enum`、带值的 namespace 和参数属性都是语法错误。
-
-其余是 JavaScript 标准库，moejs 的标准库里有 `TextEncoder`、`TextDecoder`、`atob`、`btoa`、`structuredClone` 和 `queueMicrotask`。Node 的 API 在程序里都是 undefined，包括 `require`、`import`、`process`、`Buffer`、`fs` 和 `setTimeout`。程序要读文件时调用 `read` 工具。如果你的程序要用 Node API，这个 profile 继续用 dsh 的 Node 运行时。
-
-程序自己没有沙箱，所以 `run_code` 不接受 `sandbox_permissions`。文件沙箱拒绝某次工具调用时，程序在这次调用的参数里带上 `sandbox_permissions` 和 `justification` 重试，每次这样的调用都要你批准。用 Node 运行时的话，程序通过 Node API 自己做的文件操作还能用一次批准全部放行。
-
-一次运行是这样的。函数体由模型写，运行时执行它，并把返回值交给 dsh：
+模型写出的程序是这样的，运行时把返回值交给 dsh：
 
 ```ts
 const head = await tools.bash({ description: "Read the last commit", command: "git log -1 --oneline" });
@@ -86,18 +129,6 @@ return { head: head.stdout?.text };
 | `output-limit` | 返回值大于 `maxValueBytes`。 |
 | `protocol` | 同时进行中的工具调用超过 `maxPendingCalls`，或者 sidecar 发来了格式错误的消息。 |
 | `worker-exit` | sidecar 进程退出了。下一次运行会启动新的进程。 |
-
-## 测量
-
-两个运行时通过 dsh 的 `PtcRuntime` 服务接口运行同一段程序：三次工具调用，每次由绑定函数立即返回，最后返回一个对象。每一轮里，每个运行时都在新的 Node 进程中启动。5 轮交替顺序运行，绑定在 Intel Core i5-13500H 的 8 个核上，环境是 Linux 6.18、Node 24.22.1、Go 1.26.6、dsh 0.2.1-rc.2 和 moejs v0.1.0-alpha.9。表中是各轮中位数的中位数。
-
-| 运行时 | 每次调用 | 从加载到第一个结果 |
-|---|--:|--:|
-| dsh-ptc-moejs | 0.18 ms | 5.8 ms |
-| dsh-ptc-runtime-node，workspace-write | 94.8 ms | 131.7 ms |
-| dsh-ptc-runtime-node，danger-full-access | 91.2 ms | 135.0 ms |
-
-一次调用是一次 `resolve` 加一次 `run`，从程序文本到结果。从加载到第一个结果是从挂载插件到第一次运行结束，moejs 的这段时间包含启动 sidecar。workspace-write 是 dsh 会话的默认文件策略，这时 Node 运行时在 bubblewrap 里启动每段程序。danger-full-access 下直接启动。各轮中位数里，moejs 在 0.16 到 0.20 ms 之间，Node 在 90 到 96 ms 之间。
 
 ## 限制
 
