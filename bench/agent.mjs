@@ -151,7 +151,7 @@ function descendants(root) {
 const kib = (text, field) => Number(text.match(new RegExp(`^${field}:\\s+(\\d+) kB`, 'm'))?.[1] ?? 0)
 
 /** Sample the PSS of the tree under root: the dsh process, the PTC runtime's processes, and the rest. */
-function sampleMemory(root, marker) {
+function sampleMemory(root, markers) {
   const samples = []
   const runtimePids = new Set()
   let dsh
@@ -167,7 +167,7 @@ function sampleMemory(root, marker) {
       sample.total += pss
       dsh ??= cmdline.includes('apps/cli/lib/bin.js') ? pid : undefined
       if (pid === dsh) sample.dsh += pss
-      else if (cmdline.includes(marker)) {
+      else if (markers.some(marker => cmdline.includes(marker))) {
         sample.runtime += pss
         runtimePids.add(pid)
       }
@@ -222,7 +222,8 @@ async function conversation(runtime) {
   const result = await run(['bash', '-c', '"$@"; code=$?; times >&2; exit $code', 'bash', process.execPath, cli, '--profile', 'bench', 'Survey these packages.'], {
     cwd: work,
     env: { ...env, DEEPSEEK_BASE_URL: model.baseURL, DEEPSEEK_API_KEY: 'mock-key' },
-    onSpawn: (child) => { stopSampling = sampleMemory(child.pid, runtime === 'moejs' ? 'moejs-ptc' : 'ptc-runtime-node') },
+    // On Linux a confined moejs sidecar runs from the descriptor of its binary.
+    onSpawn: (child) => { stopSampling = sampleMemory(child.pid, runtime === 'moejs' ? ['moejs-ptc', '/proc/self/fd/3'] : ['ptc-runtime-node']) },
   })
   const wallMs = performance.now() - started
   const { samples, runtimeProcesses } = stopSampling()

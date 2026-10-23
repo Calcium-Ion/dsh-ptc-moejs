@@ -77,6 +77,8 @@ The sidecar runs under the same confinement as the Node runtime's program proces
 - Of the dsh process's environment, the sidecar keeps only `PATH`, `PATHEXT`, `SYSTEMROOT`, `WINDIR`, `TEMP` and `TMP`, the variables the Node runtime keeps, so API keys stay out of it.
 - A change of a Session's file mode stops that Session's runs under the old mode.
 
+On Linux the plugin opens the sidecar's binary itself and the sandboxed sidecar runs from that open file, so it starts even where the sandbox hides the binary's directory, as bubblewrap hides /tmp under workspace-write. `ps` lists such a sidecar as `/proc/self/fd/3`.
+
 Each file policy in use has its own sidecar, which Sessions with the same mode and workspace root share. The sandbox applies to the sidecar process. The program has no file, network or process access of its own, so the policy decides what a tool call may do, not what the program does.
 
 The plugin starts the sandboxed command itself. dsh's subprocess service, which starts the Node runtime's processes, also puts each one in a systemd scope behind a Node bootstrap on Linux, so that it can reap the child processes a program leaves behind. That adds about 80 ms to a start, and the sidecar starts no child processes. The sidecar always runs on the host that runs dsh: in a deployment whose execution world is another host, such as one over SSH, a restricted mode fails with `sandbox-unavailable`.

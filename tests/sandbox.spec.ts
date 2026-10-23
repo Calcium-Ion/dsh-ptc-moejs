@@ -6,8 +6,8 @@
  */
 import { spawn } from 'node:child_process'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
-import { readFileSync, readdirSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { readFileSync, readdirSync, readlinkSync } from 'node:fs'
+import { chmod, copyFile, mkdtemp, rm } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -19,7 +19,7 @@ import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { resolveBinary } from '../src/binary.ts'
-import { launchSidecar, sidecarEnvironment } from '../src/launch.ts'
+import { BINARY_DESCRIPTOR_PATH, launchSidecar, sidecarEnvironment } from '../src/launch.ts'
 import { Sidecar } from '../src/sidecar.ts'
 import { mountRuntime } from './setup.ts'
 
@@ -44,6 +44,8 @@ const sandboxUsable = await (async () => {
 })()
 
 const binary = resolveBinary()
+// What a confined sidecar runs: on Linux, the descriptor the host opened its binary on.
+const confinedCommand = process.platform === 'linux' ? BINARY_DESCRIPTOR_PATH : binary
 const never: PtcBindingFunction = () => new Promise(() => {})
 
 function tools(functions: Record<string, PtcBindingFunction>): PtcBindingNamespace[] {
@@ -86,11 +88,12 @@ describe('launch', () => {
     const policy: SandboxExecutionPolicy = { mode: 'workspace-write', workspaceRoot: root }
     const result = await run({ program: 'return 1', bindings: [], sandboxPolicy: policy })
     expect(result).toEqual({ logs: [], value: 1, sandbox: { mode: 'workspace-write', denied: false, enforcement: 'partial' } })
-    expect(confine).toHaveBeenCalledWith([binary], { mode: 'workspace-write', workspaceRoot: root })
+    expect(confine).toHaveBeenCalledWith([confinedCommand], { mode: 'workspace-write', workspaceRoot: root })
     const [call] = spawnsIn(root)
     expect(call?.command).toBe(process.execPath)
-    expect(call?.args).toEqual([join(import.meta.dirname, 'runner.mjs'), binary])
-    expect(call?.options.stdio).toEqual(['pipe', 'pipe', 'pipe'])
+    expect(call?.args).toEqual([join(import.meta.dirname, 'runner.mjs'), confinedCommand])
+    expect((call?.options.stdio as unknown[]).slice(0, 3)).toEqual(['pipe', 'pipe', 'pipe'])
+    expect((call?.options.stdio as unknown[])[3]).toBeTypeOf(process.platform === 'linux' ? 'number' : 'undefined')
   })
 
   it('starts a danger-full-access sidecar directly', async () => {
@@ -247,6 +250,23 @@ function descendants(root: number): number[] {
   })
 }
 
+describe.skipIf(!sandboxUsable || process.platform !== 'linux')('a binary the sandbox hides', () => {
+  it('starts a confined sidecar whose binary is under /tmp', async () => {
+    const dir = await mkdtemp('/tmp/.dsh-ptc-moejs-binary-')
+    onTestFinished(async () => { await rm(dir, { recursive: true, force: true }) })
+    const hidden = join(dir, 'moejs-ptc')
+    await copyFile(binary, hidden)
+    await chmod(hidden, 0o755)
+    const root = await workspace(homedir())
+    const { ctx } = await mountRuntime({}, { mode: 'workspace-write', workspaceRoot: root })
+    const budgets = { memoryLimitBytes: 64 << 20, maxLogBytes: 1 << 20, maxValueBytes: 1 << 20, maxPendingCalls: 8, maxFrameBytes: 4 << 20 }
+    const sidecar = new Sidecar(() => launchSidecar(ctx, hidden, { mode: 'workspace-write', workspaceRoot: root }), budgets)
+    onTestFinished(async () => { await sidecar.close('test finished') })
+    expect(await sidecar.execute('return "started"', new Map(), { timeoutMs: 5_000 })).toEqual({ logs: [], value: 'started' })
+    expect(sidecar.enforcement).toBeDefined()
+  })
+})
+
 describe.skipIf(!sandboxUsable)('the host sandbox', () => {
   it('runs programs in a confined sidecar that holds none of the host\'s variables', async () => {
     vi.stubEnv('DSH_PTC_MOEJS_TEST_SECRET', 'secret')
@@ -260,10 +280,10 @@ describe.skipIf(!sandboxUsable)('the host sandbox', () => {
     expect(['full', 'partial']).toContain(result.sandbox?.enforcement)
     if (process.platform !== 'linux') return
     const sidecars = descendants(process.pid).filter((pid) => {
-      try { return readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0')[0] === binary } catch { return false }
+      try { return readlinkSync(`/proc/${pid}/exe`) === binary } catch { return false }
     })
     expect(sidecars.length).toBeGreaterThan(0)
-    const runner = await ctx.sandbox.confine([binary], { mode: 'workspace-write', workspaceRoot: root })
+    const runner = await ctx.sandbox.confine([confinedCommand], { mode: 'workspace-write', workspaceRoot: root })
     for (const pid of sidecars) {
       const environ = readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').filter(Boolean)
       expect(environ.some(entry => entry.startsWith('DSH_PTC_MOEJS_TEST_SECRET='))).toBe(false)

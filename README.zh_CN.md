@@ -77,6 +77,8 @@ sidecar 受到的限制和 Node 运行时的程序进程相同：
 - dsh 进程的环境变量里，sidecar 只保留 `PATH`、`PATHEXT`、`SYSTEMROOT`、`WINDIR`、`TEMP` 和 `TMP`，也就是 Node 运行时保留的那些，API key 不会进到 sidecar 里。
 - 会话的文件模式改变时，这个会话里按旧模式进行的运行会被停止。
 
+在 Linux 上，插件自己打开 sidecar 的二进制文件，加了沙箱的 sidecar 从这个打开的文件运行，所以即使沙箱藏起了二进制所在的目录（比如 workspace-write 下 bubblewrap 会把 /tmp 换成空目录），sidecar 也能启动。这样的 sidecar 在 `ps` 里显示为 `/proc/self/fd/3`。
+
 每个在用的文件策略有自己的 sidecar，模式和工作区根目录相同的会话共用一个。沙箱作用在 sidecar 进程上。程序自己不能访问文件、网络和进程，所以策略决定的是工具调用能做什么，而不是程序本身做什么。
 
 加了沙箱的命令由插件自己启动。dsh 的子进程服务启动 Node 运行时的进程时，在 Linux 上还会先建一个 systemd scope、经过一个 Node 引导进程，用来回收程序留下的子进程。这会让每次启动多花约 80 ms，而 sidecar 不会启动子进程。sidecar 总是运行在运行 dsh 的这台机器上：执行环境在另一台机器上的部署（例如通过 SSH）里，受限模式会以 `sandbox-unavailable` 失败。

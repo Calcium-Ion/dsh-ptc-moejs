@@ -10,6 +10,8 @@
  */
 
 import { spawn } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
+import { closeSync, openSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { SANDBOX_UNAVAILABLE, classifyRunnerFailure, isRunnerSpawnFailure } from '@deepseek-ai/dsh-sandbox'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
@@ -19,6 +21,13 @@ import type { Launch, SidecarProcess } from './sidecar.ts'
 
 /** The variables the Node runtime keeps for its program process: executable search, Windows system paths and temporary paths. */
 export const STARTUP_ENVIRONMENT_NAMES: ReadonlySet<string> = new Set(['PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP'])
+
+/**
+ * Where a confined sidecar finds its binary on Linux: the descriptor the host
+ * opened it on. A sandbox can hide the binary's directory, as bubblewrap
+ * hides /tmp under workspace-write, and the descriptor still reaches it.
+ */
+export const BINARY_DESCRIPTOR_PATH = '/proc/self/fd/3'
 
 /**
  * The sidecar's environment: the startup variables of the host's environment and nothing else.
@@ -33,14 +42,23 @@ function sandboxUnavailable(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === SANDBOX_UNAVAILABLE
 }
 
-function start(argv: readonly string[], cwd?: string): SidecarProcess {
+function start(argv: readonly string[], cwd?: string, binary?: number): SidecarProcess {
   const [command, ...args] = argv as [string, ...string[]]
-  const child = spawn(command, args, { cwd, env: sidecarEnvironment(), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+  // The child gets the binary's descriptor as fd 3; the host's copy closes once the child has its own.
+  const stdio = binary === undefined ? ['pipe', 'pipe', 'pipe'] as const : ['pipe', 'pipe', 'pipe', binary] as const
+  let child: ChildProcess
+  try {
+    child = spawn(command, args, { cwd, env: sidecarEnvironment(), stdio: [...stdio], windowsHide: true })
+  } finally {
+    if (binary !== undefined) closeSync(binary)
+  }
+  const { stdin, stdout, stderr } = child
+  if (stdin === null || stdout === null || stderr === null) throw new Error('the moejs sidecar started without its pipes')
   const done = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
     child.once('error', reject)
     child.once('close', (exitCode, signal) => { resolve({ exitCode, signal }) })
   })
-  return { stdin: child.stdin, stdout: child.stdout, stderr: child.stderr, done, terminate: () => { child.kill('SIGKILL') } }
+  return { stdin, stdout, stderr, done, terminate: () => { child.kill('SIGKILL') } }
 }
 
 /**
@@ -58,9 +76,10 @@ export async function launchSidecar(ctx: Context, binary: string, policy: Sandbo
     if (ctx.fs.processPathFromHostPath(binary) !== binary) {
       return { failure: { kind: 'sandbox-unavailable', message: `the ${policy.mode} file sandbox confines another execution world, and the moejs sidecar runs on this host` } }
     }
-    const confined = await ctx.sandbox.confine([binary], { mode: policy.mode, workspaceRoot: policy.workspaceRoot })
+    const descriptor = process.platform === 'linux'
+    const confined = await ctx.sandbox.confine([descriptor ? BINARY_DESCRIPTOR_PATH : binary], { mode: policy.mode, workspaceRoot: policy.workspaceRoot })
     return {
-      handle: start(confined.argv, policy.workspaceRoot),
+      handle: start(confined.argv, policy.workspaceRoot, descriptor ? openSync(binary, 'r') : undefined),
       enforcement: confined.enforcement,
       runnerFailed: (exit, stderr) => 'error' in exit
         ? isRunnerSpawnFailure(exit.error, confined.argv[0], policy.workspaceRoot)

@@ -1,6 +1,15 @@
 // A stand-in sandbox runner for the tests: it runs the command after it with this process's stdio.
 import { spawn } from 'node:child_process'
+import { fstatSync } from 'node:fs'
 
 const [command, ...args] = process.argv.slice(2)
-const child = spawn(command, args, { stdio: 'inherit' })
+// The host passes the sidecar's binary as fd 3 on Linux, and the command runs it from there.
+let binary = 'ignore'
+try {
+  fstatSync(3)
+  binary = 3
+} catch {
+  // No descriptor came with this command.
+}
+const child = spawn(command, args, { stdio: [0, 1, 2, binary] })
 child.on('exit', (code, signal) => { process.exitCode = code ?? (signal === null ? 1 : 128) })
