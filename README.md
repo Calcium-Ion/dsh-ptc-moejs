@@ -32,6 +32,35 @@ A call is one `resolve` and `run`, from the program text to the result. Workspac
 
 Every round started each runtime in a fresh Node process. The 5 rounds alternated the order of the runtimes on an Intel Core i5-13500H, with Linux 6.18, Node 24.22.1, Go 1.26.6, dsh 0.2.1-rc.2 and moejs v0.1.0-alpha.9. The table gives the median of the round medians, which stayed within 0.37 to 0.46 ms for moejs and within 100 to 114 ms for Node.
 
+### A long agent conversation
+
+`bench/agent.mjs` runs one conversation in a headless dsh on each runtime. A scripted model makes 40 `run_code` calls over a copy of five dsh packages, and the programs make 90 calls to dsh's tools: glob, read, grep and bash. Both runtimes ran under workspace-write on the same machine. The table gives the average of 3 conversations on each runtime.
+
+| | dsh-ptc-runtime-node | dsh-ptc-moejs |
+|---|--:|--:|
+| `run_code` time | 8.6 s | 3.6 s |
+| of which the nested tool calls | 3.5 s | 3.3 s |
+| Wall time of the conversation | 10.1 s | 5.0 s |
+| CPU time of dsh and its child processes | 8.4 s | 5.2 s |
+| Peak memory (PSS) of dsh and its child processes | 440 MiB | 437 MiB |
+| Peak memory (PSS) of the PTC runtime's processes | 34.0 MiB | 18.5 MiB |
+| Processes of the PTC runtime, bubblewrap's included | 120 | 3 |
+
+Each program took 125 ms less on moejs, between 89 and 159 ms depending on the program, and used 82 ms less CPU time. No program was slower. The tool calls take about as long on both runtimes. The difference is the Node process that the Node runtime starts inside bubblewrap for every program. Memory peaks at about the same level on both runtimes, and the dsh process itself makes up about 385 MiB of that peak. The Node runtime's process for each program reaches 34 MiB and exits with the program. The moejs sidecar and its bubblewrap processes stay up for the whole conversation and peak at 18.5 MiB.
+
+### A day of agent work
+
+The saving grows with the number of programs. The scripted model answers at once, and a real model's time per step adds the same on both runtimes, so the saving is the time an agent spends waiting for its programs. The table multiplies the measured 125 ms and 82 ms of CPU time per program by the programs of a day. The examples assume one program every 10 seconds.
+
+| Programs a day | For example | Waiting saved | CPU time saved |
+|--:|---|--:|--:|
+| 200 | half an hour of agent work | 25 s | 16 s |
+| 1,000 | about 3 hours | 2.1 min | 1.4 min |
+| 2,880 | one agent busy for 8 hours | 6.0 min | 3.9 min |
+| 11,520 | four such agents in parallel | 24 min | 16 min |
+
+The busy agent spends 10.3 minutes of its 8 hours in `run_code` on the Node runtime and 4.3 minutes on moejs. For your own estimate, multiply the programs your agents run in a day by 125 ms.
+
 ## Features
 
 ### Every effect is a tool call
@@ -169,6 +198,7 @@ pnpm test                # unit tests and the behaviour suite against the sideca
 go test ./...            # the sidecar's Go tests
 DSH_REPO=/path/to/deepseek-harness pnpm run e2e     # headless dsh with dsh's mock LLM
 DSH_REPO=/path/to/deepseek-harness pnpm run bench   # the measurements above
+DSH_REPO=/path/to/deepseek-harness pnpm run bench:agent   # the long conversation, on Linux
 pnpm run build:binaries  # all five platform binaries
 ```
 

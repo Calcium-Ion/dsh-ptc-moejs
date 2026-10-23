@@ -32,6 +32,35 @@ DeepSeek Harness 的 PTC 运行时，用 Go 写的 JavaScript 引擎 moejs 运�
 
 每一轮里，每个运行时都在新的 Node 进程中启动。5 轮交替顺序运行，环境是 Intel Core i5-13500H、Linux 6.18、Node 24.22.1、Go 1.26.6、dsh 0.2.1-rc.2 和 moejs v0.1.0-alpha.9。表中是各轮中位数的中位数，moejs 的各轮中位数在 0.37 到 0.46 ms 之间，Node 在 100 到 114 ms 之间。
 
+### 一次长的 agent 对话
+
+`bench/agent.mjs` 在 headless dsh 里分别用两个运行时跑同一段对话。一个按脚本应答的模型发起 40 次 `run_code`，对象是五个 dsh 包的副本，这些程序一共调用 90 次 dsh 的工具：glob、read、grep 和 bash。两个运行时都在同一台机器上、在 workspace-write 下运行。表中是每个运行时 3 段对话的平均值。
+
+| | dsh-ptc-runtime-node | dsh-ptc-moejs |
+|---|--:|--:|
+| `run_code` 耗时 | 8.6 s | 3.6 s |
+| 其中嵌套的工具调用 | 3.5 s | 3.3 s |
+| 整段对话的墙钟时间 | 10.1 s | 5.0 s |
+| dsh 及其子进程的 CPU 时间 | 8.4 s | 5.2 s |
+| dsh 及其子进程的内存峰值（PSS） | 440 MiB | 437 MiB |
+| PTC 运行时进程的内存峰值（PSS） | 34.0 MiB | 18.5 MiB |
+| PTC 运行时的进程数，含 bubblewrap 的进程 | 120 | 3 |
+
+每段程序在 moejs 上少用 125 ms，按程序不同在 89 到 159 ms 之间，CPU 时间少 82 ms，没有一段程序更慢。工具调用在两个运行时上用时差不多，差别在于 Node 运行时为每段程序在 bubblewrap 里启动一个 Node 进程。两个运行时的内存峰值差不多，其中约 385 MiB 是 dsh 进程本身。Node 运行时给每段程序的进程最高到 34 MiB，程序结束就退出；moejs 的 sidecar 和它的 bubblewrap 进程在整段对话里一直运行，最高 18.5 MiB。
+
+### 一天的 agent 工作
+
+节省的时间随程序的数量增长。按脚本应答的模型会立即回复，真实模型每一步的时间在两个运行时上一样多，所以省下的是 agent 等程序结果的时间。下表把实测的每段程序 125 ms 和 82 ms CPU 时间乘以一天的程序数，举例时假设每 10 秒运行一段程序。
+
+| 每天的程序数 | 例如 | 少等的时间 | 节省的 CPU 时间 |
+|--:|---|--:|--:|
+| 200 | 半小时的 agent 工作 | 25 s | 16 s |
+| 1,000 | 约 3 小时 | 2.1 min | 1.4 min |
+| 2,880 | 一个 agent 连续工作 8 小时 | 6.0 min | 3.9 min |
+| 11,520 | 四个这样的 agent 并行 | 24 min | 16 min |
+
+连续工作 8 小时的 agent，在 Node 运行时上有 10.3 分钟花在 `run_code` 上，在 moejs 上是 4.3 分钟。要估算自己的情况，把你的 agent 一天运行的程序数乘以 125 ms。
+
 ## 功能
 
 ### 对机器的每次操作都是工具调用
@@ -169,6 +198,7 @@ pnpm test                # 单元测试，以及在 dsh 自己的服务上针对
 go test ./...            # sidecar 的 Go 测试
 DSH_REPO=/path/to/deepseek-harness pnpm run e2e     # 用 dsh 的 mock LLM 跑 headless dsh
 DSH_REPO=/path/to/deepseek-harness pnpm run bench   # 上面的测量
+DSH_REPO=/path/to/deepseek-harness pnpm run bench:agent   # 长对话测评，需要 Linux
 pnpm run build:binaries  # 五个平台的程序
 ```
 

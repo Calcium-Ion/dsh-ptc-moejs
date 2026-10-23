@@ -50,6 +50,7 @@
     "test:go": "go test ./...",
     "e2e": "node e2e/run.mjs",
     "bench": "node bench/bench.mjs",
+    "bench:agent": "node bench/agent.mjs",
     "prepack": "pnpm run build"
   },
   "peerDependencies": {
