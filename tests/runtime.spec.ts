@@ -62,16 +62,60 @@ return { a: a.ok, b: b.ok, c: c.ok, n: 3 }`,
     const fail: PtcBindingFunction = () => Promise.reject(new Error('permission denied'))
     const caught = await run({
       program: `try { await tools.write({}) } catch (e) {
-  return { isClass: e instanceof ToolCallError, isError: e instanceof Error, name: e.name, tool: e.toolName, message: e.message }
+  console.log(e)
+  return { isClass: e instanceof ToolCallError, isError: e instanceof Error, name: e.name, tool: e.toolName,
+    message: e.message, text: String(e), stack: e.stack.split("\\n")[0], keys: Object.keys(e) }
 }`,
       bindings: tools({ write: fail }),
     })
-    expect(caught.value).toEqual({ isClass: true, isError: true, name: 'ToolCallError', tool: 'write', message: 'permission denied' })
+    expect(caught.value).toEqual({
+      isClass: true, isError: true, name: 'ToolCallError', tool: 'write', message: 'permission denied',
+      text: 'ToolCallError: permission denied', stack: 'ToolCallError: permission denied', keys: ['name', 'toolName'],
+    })
+    expect(caught.logs[0]).toMatch(/^ToolCallError: permission denied\n/)
     const uncaught = await run({ program: 'await tools.write({})', bindings: tools({ write: fail }) })
     expect(uncaught.error?.kind).toBe('exception')
-    expect(uncaught.error?.message).toMatch(/^ToolCallError: permission denied/)
+    expect(uncaught.error?.message).toMatch(/^ToolCallError \(tools\.write\): permission denied\n\s+at /)
     const plain = await run({ program: 'try { await tools.write({}) } catch (e) { return [e.name, e.message, typeof ToolCallError] }', bindings: tools({ write: fail }, false) })
     expect(plain.value).toEqual(['Error', 'permission denied', 'undefined'])
+  })
+
+  it('passes description requirements through to the tool', async () => {
+    const { run } = await setup()
+    const calls: unknown[] = []
+    const bash: PtcBindingFunction = async (args) => {
+      calls.push(args)
+      if (!Object.hasOwn(args as object, 'description')) {
+        throw new Error('invalid arguments: missing required property "description"')
+      }
+      return null
+    }
+    const missing = await run({ program: 'await tools.bash({ command: "pwd" })', bindings: tools({ bash }) })
+    expect(missing.error?.message).toMatch(/^ToolCallError \(tools\.bash\): invalid arguments: missing required property "description"/)
+    expect(calls).toEqual([{ command: 'pwd' }])
+    const supplied = await run({
+      program: 'return await tools.bash({ command: "pwd", description: "Show current directory" })',
+      bindings: tools({ bash }),
+    })
+    expect(supplied).toEqual({ logs: [], value: null })
+    expect(calls).toEqual([{ command: 'pwd' }, { command: 'pwd', description: 'Show current directory' }])
+  })
+
+  it('names a custom binding when its caught error is rethrown', async () => {
+    const { run } = await setup()
+    const result = await run({
+      program: `try { await api["run.command"]({}) } catch (e) {
+  console.log(e instanceof ApiError, e["operation-name"], e.message)
+  throw e
+}`,
+      bindings: [{
+        global: 'api',
+        functions: { 'run.command': () => Promise.reject(new Error('command failed')) },
+        errorClass: { name: 'ApiError', memberNameProperty: 'operation-name' },
+      }],
+    })
+    expect(result.logs).toEqual(['true run.command command failed'])
+    expect(result.error?.message).toMatch(/^ApiError \(api\["run\.command"\]\): command failed\n\s+at /)
   })
 
   it('reports a thrown non-Error and a lossy resolution as rejections', async () => {

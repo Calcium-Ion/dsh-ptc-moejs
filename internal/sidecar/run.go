@@ -58,10 +58,11 @@ type run struct {
 	notify chan struct{}
 
 	// Owned by the run's goroutine.
-	pending  map[uint64]settlers
-	nextCall uint64
-	logLeft  int
-	logCut   bool
+	pending             map[uint64]settlers
+	bindingErrorClasses map[*engine.Object]Namespace
+	nextCall            uint64
+	logLeft             int
+	logCut              bool
 }
 
 func newRun(s *server, id uint64, program string, namespaces []Namespace) *run {
@@ -187,7 +188,7 @@ func (r *run) execute() {
 			r.finishValue(rt, result)
 			return
 		case moejs.PromiseRejected:
-			r.fail(kindException, thrownMessage(rt, result))
+			r.fail(kindException, r.thrownMessage(rt, result))
 			return
 		}
 		if len(r.pending) == 0 {
@@ -220,7 +221,22 @@ func (r *run) setup(rt *moejs.Runtime) ([]moejs.Value, error) {
 	if err != nil {
 		return nil, err
 	}
-	return slices.Clone(list.AsObject().Elements()), nil
+	args := slices.Clone(list.AsObject().Elements())
+	// The prelude places error constructors after all namespace objects.
+	r.bindingErrorClasses = make(map[*engine.Object]Namespace)
+	classIndex := len(r.namespaces)
+	for _, ns := range r.namespaces {
+		if ns.ErrorClass == nil {
+			continue
+		}
+		prototype, err := rt.Get(args[classIndex], "prototype")
+		if err != nil {
+			return nil, err
+		}
+		r.bindingErrorClasses[prototype.AsObject()] = ns
+		classIndex++
+	}
+	return args, nil
 }
 
 // call is the host side of every binding: it checks the argument, sends a
@@ -366,7 +382,7 @@ func (r *run) finishError(rt *moejs.Runtime, err error) {
 	case errors.Is(err, errTooManyCalls):
 		r.fail(kindProtocol, fmt.Sprintf("the program had more than %d tool calls pending at once (maxPendingCalls)", r.s.cfg.MaxPendingCalls))
 	case errors.As(err, &exc):
-		r.fail(kindException, thrownMessage(rt, exc.Value))
+		r.fail(kindException, r.thrownMessage(rt, exc.Value))
 	case errors.As(err, &internal):
 		r.fail(kindWorkerExit, "internal error in the moejs runtime: "+internal.Error())
 	default:
@@ -400,8 +416,34 @@ func (r *run) fail(kind, message string) {
 	r.s.out.write(append(frame, "}}\n"...))
 }
 
-// thrownMessage renders a thrown value as Node's runtime does: the stack of
-// an Error, the string form of anything else.
+// thrownMessage adds the binding's qualified name to an uncaught namespace error.
+func (r *run) thrownMessage(rt *moejs.Runtime, v moejs.Value) string {
+	message := thrownMessage(rt, v)
+	if !v.IsObject() || v.AsObject().Class() != engine.ClassError {
+		return message
+	}
+	ns, ok := r.bindingErrorClasses[v.AsObject().Proto()]
+	if !ok {
+		return message
+	}
+	member, ok := v.AsObject().GetOwnDataValue(rt.Realm().KeyFromGoString(ns.ErrorClass.MemberNameProperty))
+	if !ok || !member.IsString() {
+		return message
+	}
+	name := member.String()
+	qualified := ns.Global + "." + name
+	if !identifier.MatchString(name) {
+		qualified = ns.Global + "[" + strconv.Quote(name) + "]"
+	}
+	label := ns.ErrorClass.Name + " (" + qualified + ")"
+	if tail, ok := strings.CutPrefix(message, ns.ErrorClass.Name); ok &&
+		(tail == "" || strings.HasPrefix(tail, ":") || strings.HasPrefix(tail, "\n")) {
+		return label + tail
+	}
+	return label + ": " + message
+}
+
+// thrownMessage renders an Error's stack or the string form of another thrown value.
 func thrownMessage(rt *moejs.Runtime, v moejs.Value) string {
 	if v.IsObject() {
 		if stack, err := rt.Get(v, "stack"); err == nil && stack.IsString() && stack.String() != "" {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -271,7 +272,47 @@ try {
 }`)
 	expectValue(t, o, `{"className":"ToolCallError","cls":true,"err":true,"member":"fail","message":"it failed","name":"ToolCallError","own":["name","toolName"]}`)
 	o = h.eval(`await tools.fail({})`)
-	expectFailure(t, o, kindException, "ToolCallError: it failed")
+	expectFailure(t, o, kindException, "ToolCallError (tools.fail): it failed")
+}
+
+func TestUncaughtBindingErrorDiagnostics(t *testing.T) {
+	namespaces := append(slices.Clone(toolsNS),
+		Namespace{Global: "plain", Names: []string{"fail"}},
+		Namespace{Global: "api", Names: []string{"fail", "run.command"},
+			ErrorClass: &ErrorClass{Name: "ApiError", MemberNameProperty: "operation-name"}},
+	)
+	for _, tt := range []struct {
+		name    string
+		program string
+		prefix  string
+		log     string
+	}{
+		{"custom namespace", `await api.fail({})`, "ApiError (api.fail): it failed\n", ""},
+		{"quoted member", `await api["run.command"]()`, "ApiError (api[\"run.command\"]): binding arguments must be lossless JSON", ""},
+		{"caught then rethrown", `try { await tools.fail({}) } catch (e) { console.log(e); throw e }`,
+			"ToolCallError (tools.fail): it failed\n", "ToolCallError: it failed\n"},
+		{"rethrow in a microtask", `try { await tools.fail({}) } catch (e) { queueMicrotask(() => { throw e }); await tools.echo({}) }`,
+			"ToolCallError (tools.fail): it failed\n", ""},
+		{"custom stack", `try { await tools.fail({}) } catch (e) { e.stack = "custom trace"; throw e }`,
+			"ToolCallError (tools.fail): custom trace", ""},
+		{"ordinary error", `throw new Error("ordinary")`, "Error: ordinary\n", ""},
+		{"lookalike error", `const e = new Error("ordinary"); e.name = "ToolCallError"; e.toolName = "fail"; throw e`,
+			"ToolCallError: ordinary\n", ""},
+		{"untyped binding", `await plain.fail({})`, "Error: it failed\n", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := start(t, testConfig)
+			h.run(1, tt.program, namespaces)
+			o := h.finish(1)
+			kind, message := o.failure()
+			if kind != kindException || !strings.HasPrefix(message, tt.prefix) {
+				t.Fatalf("failure = (%s) %q, want prefix %q", kind, message, tt.prefix)
+			}
+			if tt.log != "" && (len(o.logs) != 1 || !strings.HasPrefix(o.logs[0], tt.log)) {
+				t.Fatalf("logs = %v, want prefix %q", o.logs, tt.log)
+			}
+		})
+	}
 }
 
 func TestBindingNamesAreOrdinaryOwnProperties(t *testing.T) {
