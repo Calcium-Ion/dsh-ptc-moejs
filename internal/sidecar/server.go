@@ -4,21 +4,26 @@
 //
 // Host to sidecar:
 //
-//	{"type":"boot","protocol":1,"memoryLimitBytes":N,"maxLogBytes":N,"maxValueBytes":N,"maxPendingCalls":N,"maxFrameBytes":N}
-//	{"type":"run","run":R,"program":"...","namespaces":[{"global":"tools","names":["bash"],"errorClass":{"name":"ToolCallError","memberNameProperty":"toolName"}}]}
+//	{"type":"boot","protocol":2,"memoryLimitBytes":N,"maxLogBytes":N,"maxValueBytes":N,"maxPendingCalls":N,"maxPendingTimers":N,"maxFrameBytes":N}
+//	{"type":"run","run":R,"program":"...","namespaces":[{"global":"tools","names":["bash"],"errorClass":{"name":"ToolCallError","memberNameProperty":"toolName"}}],"cwd":"/work","moduleRoot":"/work"}
 //	{"type":"reply","run":R,"id":N,"ok":true,"value":<json>}
 //	{"type":"reply","run":R,"id":N,"ok":false,"message":"..."}
 //	{"type":"cancel","run":R}
 //
 // Sidecar to host:
 //
-//	{"type":"boot-ack","protocol":1}
+//	{"type":"boot-ack","protocol":2}
 //	{"type":"call","run":R,"id":N,"global":"tools","name":"bash","args":<json>}
 //	{"type":"log","run":R,"text":"..."}
 //	{"type":"log","run":R,"text":"...","truncated":true}
 //	{"type":"done","run":R}
 //	{"type":"done","run":R,"value":<json>}
 //	{"type":"done","run":R,"error":{"kind":"exception","message":"..."}}
+//
+// cwd is the run's working directory in dsh's execution world, which
+// node:path resolves against. moduleRoot is the same directory on this
+// host, present when the run may import files from it; it is absent when
+// the execution world is another host.
 //
 // Call ids count from 1 in each run. After a cancel the sidecar stops sending
 // frames for that run. A cancel and a frame can cross on the wire, so each
@@ -41,7 +46,7 @@ import (
 )
 
 // Protocol is the wire version the host and the sidecar must agree on.
-const Protocol = 1
+const Protocol = 2
 
 // frameEnvelope is room for the fields around a value in one frame.
 const frameEnvelope = 256
@@ -54,17 +59,24 @@ const shutdownWait = 2 * time.Second
 //go:embed prelude.js
 var preludeSource string
 
+// inspectSource is the renderer of console and node:util, which the
+// sidecar compiles the first time a program renders a value.
+//
+//go:embed inspect.js
+var inspectSource string
+
 // Config holds the budgets of the boot frame.
 type Config struct {
 	MemoryLimitBytes int64 `json:"memoryLimitBytes"`
 	MaxLogBytes      int   `json:"maxLogBytes"`
 	MaxValueBytes    int   `json:"maxValueBytes"`
 	MaxPendingCalls  int   `json:"maxPendingCalls"`
+	MaxPendingTimers int   `json:"maxPendingTimers"`
 	MaxFrameBytes    int   `json:"maxFrameBytes"`
 }
 
 func (c Config) validate() error {
-	if c.MemoryLimitBytes <= 0 || c.MaxLogBytes <= 0 || c.MaxValueBytes <= 0 || c.MaxPendingCalls <= 0 || c.MaxFrameBytes <= frameEnvelope {
+	if c.MemoryLimitBytes <= 0 || c.MaxLogBytes <= 0 || c.MaxValueBytes <= 0 || c.MaxPendingCalls <= 0 || c.MaxPendingTimers <= 0 || c.MaxFrameBytes <= frameEnvelope {
 		return errors.New("boot frame budgets must be positive")
 	}
 	if c.MaxLogBytes > c.MaxFrameBytes-frameEnvelope || c.MaxValueBytes > c.MaxFrameBytes-frameEnvelope {
@@ -97,6 +109,8 @@ type inFrame struct {
 	Message    string          `json:"message"`
 	Program    string          `json:"program"`
 	Namespaces []Namespace     `json:"namespaces"`
+	Cwd        string          `json:"cwd"`
+	ModuleRoot string          `json:"moduleRoot"`
 }
 
 // Serve runs the sidecar until in ends or a frame is malformed.
@@ -158,9 +172,15 @@ type server struct {
 	cfg     Config
 	prelude *moejs.Script
 	out     *writer
-	mu      sync.Mutex
-	runs    map[uint64]*run
-	wg      sync.WaitGroup
+	modules moduleCache
+	inspect struct {
+		once   sync.Once
+		script *moejs.Script
+		err    error
+	}
+	mu   sync.Mutex
+	runs map[uint64]*run
+	wg   sync.WaitGroup
 }
 
 func (s *server) start(f inFrame) error {
@@ -169,7 +189,7 @@ func (s *server) start(f inFrame) error {
 	if f.Run == 0 || s.runs[f.Run] != nil {
 		return fmt.Errorf("run id %d is zero or already in use", f.Run)
 	}
-	r := newRun(s, f.Run, f.Program, f.Namespaces)
+	r := newRun(s, f)
 	s.runs[f.Run] = r
 	s.wg.Add(1)
 	go func() {
@@ -178,6 +198,14 @@ func (s *server) start(f inFrame) error {
 		s.forget(r.id)
 	}()
 	return nil
+}
+
+// inspectScript returns inspect.js, compiled on first use.
+func (s *server) inspectScript() (*moejs.Script, error) {
+	s.inspect.once.Do(func() {
+		s.inspect.script, s.inspect.err = moejs.CompileScript("inspect.js", inspectSource)
+	})
+	return s.inspect.script, s.inspect.err
 }
 
 // forget drops a run before its last frame, so a frame for it that crosses

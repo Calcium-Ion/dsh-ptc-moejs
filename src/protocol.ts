@@ -9,7 +9,7 @@ import type { PtcJsonValue, PtcRunFailure, PtcRunResult } from '@deepseek-ai/dsh
 import { isJsonValue } from '@deepseek-ai/dsh-util-values'
 
 /** The wire version this host speaks. */
-export const PROTOCOL = 1
+export const PROTOCOL = 2
 
 /** Bytes around a value in one frame, reserved out of the frame budget. */
 export const FRAME_ENVELOPE = 256

@@ -3,8 +3,13 @@
  * provider: budgets, deadlines and aborts, disposal, lossless JSON in both
  * directions, binding names and a crashed sidecar.
  */
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
+import FileSystem from '@deepseek-ai/dsh-fs-local'
 import type { PtcBindingFunction, PtcBindingNamespace, PtcRunRequest } from '@deepseek-ai/dsh-ptc-runtime'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { Config } from '../src/index.ts'
 import { LogLedger } from '../src/protocol.ts'
 import { internals, mountRuntime, sidecarProcess } from './setup.ts'
@@ -214,15 +219,79 @@ return out`,
     expect(enumResult.error?.message).toContain('(program.ts:2:1)')
   })
 
-  it('exposes no Node APIs, imports or timers', async () => {
+  it('exposes no Node APIs beyond the timers and the built-in modules', async () => {
     const { run } = await setup()
     const result = await run({
       program: `let imported = "resolved"
-try { await import("node:fs") } catch (e) { imported = e.name }
-return [typeof process, typeof require, typeof Buffer, typeof setTimeout, typeof fetch, imported]`,
+try { await import("node:fs") } catch (e) { imported = e.message }
+return [typeof process, typeof require, typeof Buffer, typeof fetch, typeof setTimeout, imported]`,
       bindings: [],
     })
-    expect(result.value).toEqual(['undefined', 'undefined', 'undefined', 'undefined', 'undefined', 'TypeError'])
+    expect(result.value).toEqual(['undefined', 'undefined', 'undefined', 'undefined', 'function',
+      'Cannot import "node:fs": this runtime has no node:fs; the program reaches files, commands and the network through its tools, and the built-in modules are node:path, node:util, node:timers, node:timers/promises and node:vm'])
+  })
+
+  it('waits for timers between tool calls', async () => {
+    const { run } = await setup()
+    const calls: number[] = []
+    const result = await run({
+      program: `const { setTimeout: sleep } = await import("node:timers/promises")
+const results = []
+for (let attempt = 1; attempt <= 3; attempt++) {
+  const reply = await tools.flaky({ attempt })
+  results.push(reply.ok)
+  if (reply.ok) break
+  await sleep(5 * attempt)
+}
+return results`,
+      bindings: tools({ flaky: (args) => { calls.push(Date.now()); return Promise.resolve({ ok: (args as { attempt: number }).attempt === 3 }) } }),
+    })
+    expect(result).toEqual({ logs: [], value: [false, false, true] })
+    expect(calls[2]! - calls[0]!).toBeGreaterThanOrEqual(14)
+  })
+
+  it('stops a program that waits for a timer at its deadline', async () => {
+    const { run } = await setup()
+    const started = Date.now()
+    const result = await run({ program: 'await new Promise(resolve => setTimeout(resolve, 60_000))', bindings: [], timeoutMs: 100 })
+    expect(result.error).toEqual({ kind: 'timeout', message: 'execution deadline reached (100ms)' })
+    expect(Date.now() - started).toBeLessThan(5_000)
+  })
+
+  it('imports TypeScript helpers from the working directory', async () => {
+    const dir = await mkdtemp(join(tmpdir(), '.dsh-ptc-moejs-modules-'))
+    onTestFinished(async () => { await rm(dir, { recursive: true, force: true }) })
+    await mkdir(join(dir, 'lib'))
+    await writeFile(join(dir, 'helpers.ts'), `import { words } from './lib/words.ts'
+import { basename } from 'node:path'
+export async function summarize(tools: { read(args: { path: string }): Promise<{ text: string }> }, path: string) {
+  const { text } = await tools.read({ path })
+  console.log('summarized', basename(path))
+  return { file: basename(path), words: words(text) }
+}
+`)
+    await writeFile(join(dir, 'lib', 'words.ts'), 'export const words = (text: string): number => text.split(/\\s+/).filter(Boolean).length\n')
+    const { run } = await setup()
+    const result = await run({
+      program: 'const { summarize } = await import("./helpers.ts")\nreturn await summarize(tools, "notes/a.txt")',
+      bindings: tools({ read: () => Promise.resolve({ text: 'three short words' }) }),
+      cwd: dir,
+    })
+    expect(result).toEqual({ logs: ['summarized a.txt'], value: { file: 'a.txt', words: 3 } })
+    const missing = await run({ program: 'await import("./nope.ts")', bindings: [], cwd: dir })
+    expect(missing.error?.message).toContain(`Cannot import "./nope.ts": ${join(dir, 'nope.ts')} does not exist`)
+  })
+
+  it('imports no files when dsh\'s execution world is another host', async () => {
+    const ctx = new Context()
+    await ctx.plugin(FileSystem)
+    vi.spyOn(ctx.fs, 'processPathFromHostPath').mockReturnValue(undefined)
+    const { runtime } = await mountRuntime({}, {}, ctx)
+    const result = await runtime.run(runtime.resolve({ program: 'await import("./helpers.ts")', bindings: [], cwd: tmpdir() }))
+    expect(result.error?.message).toContain('this run cannot import files, because its working directory is on another host')
+    expect(runtime.executionInstructions).not.toContain('helpers.ts')
+    const builtin = await runtime.run(runtime.resolve({ program: 'return (await import("node:path")).posix.join("a", "b")', bindings: [], cwd: tmpdir() }))
+    expect(builtin.value).toBe('a/b')
   })
 
   it('fails a program waiting for a promise nothing can settle', async () => {

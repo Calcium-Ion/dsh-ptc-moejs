@@ -19,6 +19,7 @@ describe('configuration', () => {
       maxLogBytes: 16 * 1024 * 1024,
       maxValueBytes: 16 * 1024 * 1024,
       maxPendingCalls: 128,
+      maxPendingTimers: 65_536,
       maxFrameBytes: 64 * 1024 * 1024,
     })
   })
@@ -107,7 +108,9 @@ describe('resolve', () => {
     expect(runtime.isolation).toBe('process')
     expect(runtime.programFormat).toBe('function-body')
     expect(runtime.sandboxMode).toBe('danger-full-access')
-    expect(runtime.executionInstructions).toContain('Node APIs, require, import, process, timers and direct file or network access are absent')
+    expect(runtime.executionInstructions).toContain('setTimeout, setInterval, setImmediate and their clear functions')
+    expect(runtime.executionInstructions).toContain('await import("./helpers.ts") loads a .ts, .mts, .js or .mjs file of the working directory')
+    expect(runtime.executionInstructions).toContain('Other Node APIs, require, process, packages and direct network access are absent')
     expect(runtime.executionInstructions).toContain('sandbox_permissions on run_code does not let it do more')
     expect(runtime.executionInstructions).toContain('retry that call with sandbox_permissions and justification in its own arguments')
     expect(runtime.executionInstructions).toContain('256 MiB')

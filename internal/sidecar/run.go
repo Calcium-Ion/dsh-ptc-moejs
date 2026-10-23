@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/Calcium-Ion/moejs"
@@ -49,6 +50,7 @@ type run struct {
 	id         uint64
 	program    string
 	namespaces []Namespace
+	imports    *imports
 
 	rt        atomic.Pointer[moejs.Runtime]
 	cancelled atomic.Bool
@@ -58,6 +60,10 @@ type run struct {
 	notify chan struct{}
 
 	// Owned by the run's goroutine.
+	loop                *loop
+	values              runtimeValues
+	headerLen           int
+	unhandled           []*engine.Object // rejected promises no handler took yet, in order
 	pending             map[uint64]settlers
 	bindingErrorClasses map[*engine.Object]Namespace
 	nextCall            uint64
@@ -65,15 +71,19 @@ type run struct {
 	logCut              bool
 }
 
-func newRun(s *server, id uint64, program string, namespaces []Namespace) *run {
-	return &run{
-		s: s, id: id, program: program, namespaces: namespaces,
+func newRun(s *server, f inFrame) *run {
+	r := &run{
+		s: s, id: f.Run, program: f.Program, namespaces: f.Namespaces,
 		notify:  make(chan struct{}, 1),
+		loop:    newLoop(s.cfg.MaxPendingTimers),
 		pending: map[uint64]settlers{},
 		// Each entry pays for its JSON string and the "[" or "," before it, so
 		// the budget keeps one byte for the closing "]".
 		logLeft: s.cfg.MaxLogBytes - 1,
 	}
+	r.imports = newImports(&s.modules, f.Cwd, f.ModuleRoot, func() *runtimeValues { return &r.values })
+	r.loop.warn = r.logLine
+	return r
 }
 
 // deliver queues a reply for the run's goroutine.
@@ -100,21 +110,50 @@ func (r *run) wake() {
 	}
 }
 
-// next waits for the next reply. It returns false once the run is cancelled.
-func (r *run) next() (reply, bool) {
+// take returns the replies that have arrived.
+func (r *run) take() []reply {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	batch := r.queue
+	r.queue = nil
+	return batch
+}
+
+// wait sleeps until the next timer is due or a frame for the run arrives.
+// It reports false once the run is over: cancelled, or failed because
+// nothing can settle the program's promise.
+func (r *run) wait(sleep *time.Timer) bool {
 	for {
 		if r.cancelled.Load() {
-			return reply{}, false
+			return false
 		}
 		r.mu.Lock()
-		if len(r.queue) > 0 {
-			rep := r.queue[0]
-			r.queue = r.queue[1:]
-			r.mu.Unlock()
-			return rep, true
-		}
+		queued := len(r.queue) > 0
 		r.mu.Unlock()
-		<-r.notify
+		if queued {
+			return true
+		}
+		if len(r.pending) == 0 && !r.loop.alive() {
+			r.fail(kindException, "the program is waiting for a promise that nothing can settle: no tool call is pending, and no timer or immediate keeps the program running")
+			return false
+		}
+		if len(r.loop.immediates) > 0 {
+			return true
+		}
+		switch d := r.loop.next(); {
+		case d == 0:
+			return true
+		case d < 0:
+			<-r.notify
+		default:
+			sleep.Reset(d)
+			select {
+			case <-r.notify:
+				sleep.Stop()
+			case <-sleep.C:
+				return true
+			}
+		}
 	}
 }
 
@@ -148,6 +187,7 @@ func (r *run) execute() {
 	}
 	// The program starts on the header's line, so its line numbers stay its own.
 	header := "export default async function (" + strings.Join(params, ", ") + ") {"
+	r.headerLen = len(header)
 	mod, err := moejs.CompileTS("program.ts", header+r.program+"\n}")
 	if err != nil {
 		r.fail(kindException, syntaxMessage(err, len(header)))
@@ -156,7 +196,9 @@ func (r *run) execute() {
 	if r.cancelled.Load() {
 		return
 	}
-	rt := moejs.NewRuntime(moejs.Options{MemoryLimit: r.s.cfg.MemoryLimitBytes})
+	rt := moejs.NewRuntime(moejs.Options{MemoryLimit: r.s.cfg.MemoryLimitBytes, Importer: r.imports.importer()})
+	defer r.imports.close()
+	rt.SetPromiseRejectionTracker(r.trackRejection)
 	r.rt.Store(rt)
 	if r.cancelled.Load() {
 		return
@@ -177,34 +219,123 @@ func (r *run) execute() {
 		return
 	}
 	promise, err := rt.Call(hook, args...)
-	for {
-		if err != nil {
-			r.finishError(rt, err)
-			return
-		}
-		state, result, _ := moejs.PromiseResult(promise)
-		switch state {
-		case moejs.PromiseFulfilled:
-			r.finishValue(rt, result)
-			return
-		case moejs.PromiseRejected:
-			r.fail(kindException, r.thrownMessage(rt, result))
-			return
-		}
-		if len(r.pending) == 0 {
-			r.fail(kindException, "the program is waiting for a promise that nothing can settle: no tool call is pending, and this runtime has no timers")
-			return
-		}
-		rep, ok := r.next()
-		if !ok {
-			return
-		}
-		err = r.settle(rt, rep)
+	if !r.over(rt, promise, err) {
+		r.drive(rt, promise)
 	}
 }
 
-// setup runs the prelude and returns the program's arguments.
+// drive runs the program's callbacks until its promise settles, in the
+// phases of Node's event loop: the timers due when the phase starts, then
+// the replies that have arrived, then the immediates set so far. The
+// promise jobs of each callback run when it returns. Timers that are still
+// pending when the promise settles never run, as the Node runtime's
+// process ends with the program.
+func (r *run) drive(rt *moejs.Runtime, promise moejs.Value) {
+	sleep := time.NewTimer(time.Hour)
+	sleep.Stop()
+	defer sleep.Stop()
+	for {
+		ran := false
+		now := r.loop.now()
+		for t := r.loop.due(now); t != nil; t = r.loop.due(now) {
+			ran = true
+			if r.over(rt, promise, r.loop.fire(rt, t)) {
+				return
+			}
+		}
+		for _, rep := range r.take() {
+			ran = true
+			if r.over(rt, promise, r.settle(rt, rep)) {
+				return
+			}
+		}
+		for _, im := range r.loop.takeImmediates() {
+			called, err := r.loop.runImmediate(rt, im)
+			ran = ran || called
+			if called && r.over(rt, promise, err) {
+				return
+			}
+		}
+		if !ran && !r.wait(sleep) {
+			return
+		}
+	}
+}
+
+// over reports whether the run is over after a callback returned err: the
+// callback failed, the program's promise settled, a promise rejected with no
+// handler, or the run was cancelled. It sends the run's outcome. As in Node,
+// a rejection is unhandled when no handler took it by the time the
+// callback's promise jobs ran out, and it ends the program.
+func (r *run) over(rt *moejs.Runtime, promise moejs.Value, err error) bool {
+	if err != nil {
+		r.finishError(rt, err)
+		return true
+	}
+	state, result, _ := moejs.PromiseResult(promise)
+	switch state {
+	case moejs.PromiseFulfilled:
+		r.finishValue(rt, result)
+		return true
+	case moejs.PromiseRejected:
+		r.fail(kindException, r.thrownMessage(rt, result))
+		return true
+	}
+	if len(r.unhandled) > 0 {
+		_, reason, _ := moejs.PromiseResult(engine.ObjectValue(r.unhandled[0]))
+		r.fail(kindException, "Uncaught (in promise) "+r.thrownMessage(rt, reason))
+		return true
+	}
+	return r.cancelled.Load()
+}
+
+// trackRejection keeps the rejected promises that have no handler.
+func (r *run) trackRejection(p moejs.Value, op moejs.PromiseRejectionOperation) {
+	o := p.AsObject()
+	switch op {
+	case moejs.PromiseRejectionReject:
+		r.unhandled = append(r.unhandled, o)
+	case moejs.PromiseRejectionHandle:
+		if i := slices.Index(r.unhandled, o); i >= 0 {
+			r.unhandled = slices.Delete(r.unhandled, i, i+1)
+		}
+	}
+}
+
+// loadInspect runs inspect.js in the run's runtime and returns its
+// makeInspect, for the prelude to build console's renderer on first use.
+func (r *run) loadInspect(_ *moejs.Realm, _ moejs.Value, _ []moejs.Value) (moejs.Value, error) {
+	script, err := r.s.inspectScript()
+	if err != nil {
+		return moejs.Undefined(), err
+	}
+	return r.rt.Load().RunScript(script)
+}
+
+// promiseDetails gives the prelude's inspect the state of a promise: [0]
+// pending, [1, value] fulfilled, [2, reason] rejected, undefined for an
+// object that is not a promise.
+func (r *run) promiseDetails(_ *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+	state, result, ok := moejs.PromiseResult(moejs.Arg(args, 0))
+	if !ok {
+		return moejs.Undefined(), nil
+	}
+	code := 0
+	switch state {
+	case moejs.PromiseFulfilled:
+		code = 1
+	case moejs.PromiseRejected:
+		code = 2
+	}
+	return r.rt.Load().FromGo([]any{code, result})
+}
+
+// setup installs the timers, runs the prelude and returns the program's
+// arguments.
 func (r *run) setup(rt *moejs.Runtime) ([]moejs.Value, error) {
+	if err := r.loop.install(rt); err != nil {
+		return nil, err
+	}
 	fn, err := rt.RunScript(r.s.prelude)
 	if err != nil {
 		return nil, err
@@ -217,11 +348,14 @@ func (r *run) setup(rt *moejs.Runtime) ([]moejs.Value, error) {
 	if err != nil {
 		return nil, err
 	}
-	list, err := rt.CallFunction(fn, moejs.Undefined(), nsValue, rt.Function("call", 3, r.call), rt.Function("log", 1, r.log))
+	result, err := rt.CallFunction(fn, moejs.Undefined(), nsValue, rt.Function("call", 3, r.call), rt.Function("log", 1, r.log),
+		rt.Function("loadInspect", 0, r.loadInspect), rt.Function("promiseDetails", 1, r.promiseDetails), moejs.Int(int64(r.headerLen)))
 	if err != nil {
 		return nil, err
 	}
-	args := slices.Clone(list.AsObject().Elements())
+	parts := result.AsObject().Elements()
+	args := slices.Clone(parts[0].AsObject().Elements())
+	r.values = runtimeValues{inspector: parts[1], timers: r.loop.natives}
 	// The prelude places error constructors after all namespace objects.
 	r.bindingErrorClasses = make(map[*engine.Object]Namespace)
 	classIndex := len(r.namespaces)
@@ -317,6 +451,11 @@ func (r *run) log(realm *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.
 	}
 	r.sendLog([]byte(`""`), true)
 	return moejs.Undefined(), nil
+}
+
+// logLine logs text as a console line of the program.
+func (r *run) logLine(text string) {
+	_, _ = r.log(nil, moejs.Undefined(), []moejs.Value{moejs.String(text)})
 }
 
 func (r *run) sendLog(text []byte, truncated bool) {
@@ -416,9 +555,10 @@ func (r *run) fail(kind, message string) {
 	r.s.out.write(append(frame, "}}\n"...))
 }
 
-// thrownMessage adds the binding's qualified name to an uncaught namespace error.
+// thrownMessage adds the binding's qualified name to an uncaught namespace
+// error, and gives the frames on the program's first line its own columns.
 func (r *run) thrownMessage(rt *moejs.Runtime, v moejs.Value) string {
-	message := thrownMessage(rt, v)
+	message := fixColumns(thrownMessage(rt, v), r.headerLen)
 	if !v.IsObject() || v.AsObject().Class() != engine.ClassError {
 		return message
 	}
@@ -471,6 +611,50 @@ func syntaxMessage(err error, headerLen int) string {
 	if se.Line == 1 {
 		col -= headerLen
 	}
-	msg := strings.TrimSuffix(se.Message, " (see TODO.md)")
+	msg := syntaxHint(se.Message)
+	if strings.HasPrefix(msg, "'import' and 'export' may only appear at the top level") {
+		msg += "; the program is the body of an async function: it loads modules with `await import(...)` and returns its result"
+	}
 	return fmt.Sprintf("SyntaxError: %s (program.ts:%d:%d)", msg, se.Line, max(col, 1))
+}
+
+// syntaxHint drops moejs's pointer to its own TODO list from a syntax error
+// and says what to do instead of an import attribute.
+func syntaxHint(msg string) string {
+	msg = strings.TrimSuffix(msg, " (see TODO.md)")
+	if strings.HasPrefix(msg, "import attribute syntax is not supported") {
+		msg += "; this runtime has no JSON modules: read the file with a tool and parse it with JSON.parse"
+	}
+	return msg
+}
+
+// fixColumns gives the frames of a stack on the program's first line the
+// program's own columns: the program shares that line with the header of
+// the function it is the body of.
+func fixColumns(stack string, headerLen int) string {
+	const marker = "program.ts:1:"
+	var b strings.Builder
+	for {
+		i := strings.Index(stack, marker)
+		if i < 0 {
+			if b.Len() == 0 {
+				return stack
+			}
+			b.WriteString(stack)
+			return b.String()
+		}
+		start := i + len(marker)
+		end := start
+		for end < len(stack) && stack[end] >= '0' && stack[end] <= '9' {
+			end++
+		}
+		col, err := strconv.Atoi(stack[start:end])
+		if err != nil || (i > 0 && stack[i-1] != '(' && stack[i-1] != ' ') {
+			b.WriteString(stack[:end])
+		} else {
+			b.WriteString(stack[:start])
+			b.WriteString(strconv.Itoa(max(col-headerLen, 1)))
+		}
+		stack = stack[end:]
+	}
 }

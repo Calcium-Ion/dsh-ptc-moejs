@@ -19,6 +19,7 @@ export interface Budgets {
   maxLogBytes: number
   maxValueBytes: number
   maxPendingCalls: number
+  maxPendingTimers: number
   maxFrameBytes: number
 }
 
@@ -151,6 +152,10 @@ class Execution {
 export interface ExecuteOptions {
   timeoutMs: number | null
   signal?: AbortSignal | undefined
+  /** The working directory in dsh's execution world. */
+  cwd: string
+  /** The working directory on this host, when the program may import files from it. */
+  moduleRoot?: string | undefined
 }
 
 /** The moejs-ptc process of one file policy, started by a launcher. */
@@ -220,6 +225,8 @@ export class Sidecar {
         names: Object.keys(ns.functions),
         ...ns.errorClass === undefined ? {} : { errorClass: ns.errorClass },
       })),
+      cwd: options.cwd,
+      ...options.moduleRoot === undefined ? {} : { moduleRoot: options.moduleRoot },
     })
     if (Buffer.byteLength(frame, 'utf8') > this.budgets.maxFrameBytes) {
       run.fail({ kind: 'exception', message: `the program and its bindings exceed ${this.budgets.maxFrameBytes} bytes (maxFrameBytes)` })

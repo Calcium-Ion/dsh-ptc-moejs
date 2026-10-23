@@ -25,6 +25,7 @@ var testConfig = Config{
 	MaxLogBytes:      1 << 16,
 	MaxValueBytes:    1 << 16,
 	MaxPendingCalls:  16,
+	MaxPendingTimers: 64,
 	MaxFrameBytes:    1 << 20,
 }
 
@@ -57,7 +58,7 @@ func start(t *testing.T, cfg Config) *harness {
 	h.send(map[string]any{
 		"type": "boot", "protocol": Protocol,
 		"memoryLimitBytes": cfg.MemoryLimitBytes, "maxLogBytes": cfg.MaxLogBytes, "maxValueBytes": cfg.MaxValueBytes,
-		"maxPendingCalls": cfg.MaxPendingCalls, "maxFrameBytes": cfg.MaxFrameBytes,
+		"maxPendingCalls": cfg.MaxPendingCalls, "maxPendingTimers": cfg.MaxPendingTimers, "maxFrameBytes": cfg.MaxFrameBytes,
 	})
 	if f := h.recv(); f["type"] != "boot-ack" {
 		t.Fatalf("expected boot-ack, got %v", f)
@@ -570,10 +571,9 @@ func TestConcurrentRuns(t *testing.T) {
 func TestProgramsHaveNoHostAPIs(t *testing.T) {
 	h := start(t, testConfig)
 	o := h.eval(`
-let imported = "resolved"
-try { await import("node:fs") } catch (e) { imported = e.name }
-return [typeof process, typeof require, typeof setTimeout, typeof fetch, typeof globalThis.console, typeof globalThis.tools, imported]`)
-	expectValue(t, o, `["undefined","undefined","undefined","undefined","undefined","undefined","TypeError"]`)
+return [typeof process, typeof require, typeof fetch, typeof Buffer, typeof globalThis.tools,
+  typeof setTimeout, typeof setImmediate, globalThis.console === console, Object.keys(globalThis).includes("console")]`)
+	expectValue(t, o, `["undefined","undefined","undefined","undefined","undefined","function","function",true,false]`)
 }
 
 func TestProgramWaitingForNothingFails(t *testing.T) {
@@ -599,12 +599,12 @@ func TestRejectsBadFrames(t *testing.T) {
 	for name, input := range map[string]string{
 		"not a boot frame": `{"type":"run","run":1}` + "\n",
 		"other protocol":   `{"type":"boot","protocol":99}` + "\n",
-		"bad budgets":      `{"type":"boot","protocol":1}` + "\n",
-		"malformed frame": `{"type":"boot","protocol":1,"memoryLimitBytes":1048576,"maxLogBytes":1024,"maxValueBytes":1024,"maxPendingCalls":1,"maxFrameBytes":4096}` + "\n" +
+		"bad budgets":      `{"type":"boot","protocol":2}` + "\n",
+		"malformed frame": `{"type":"boot","protocol":2,"memoryLimitBytes":1048576,"maxLogBytes":1024,"maxValueBytes":1024,"maxPendingCalls":1,"maxPendingTimers":1,"maxFrameBytes":4096}` + "\n" +
 			"{not json\n",
-		"oversized frame": `{"type":"boot","protocol":1,"memoryLimitBytes":1048576,"maxLogBytes":1024,"maxValueBytes":1024,"maxPendingCalls":1,"maxFrameBytes":4096}` + "\n" +
+		"oversized frame": `{"type":"boot","protocol":2,"memoryLimitBytes":1048576,"maxLogBytes":1024,"maxValueBytes":1024,"maxPendingCalls":1,"maxPendingTimers":1,"maxFrameBytes":4096}` + "\n" +
 			`{"type":"run","run":1,"program":"` + strings.Repeat("x", 5000) + `"}` + "\n",
-		"duplicate run id": `{"type":"boot","protocol":1,"memoryLimitBytes":1048576,"maxLogBytes":1024,"maxValueBytes":1024,"maxPendingCalls":1,"maxFrameBytes":4096}` + "\n" +
+		"duplicate run id": `{"type":"boot","protocol":2,"memoryLimitBytes":1048576,"maxLogBytes":1024,"maxValueBytes":1024,"maxPendingCalls":1,"maxPendingTimers":1,"maxFrameBytes":4096}` + "\n" +
 			`{"type":"run","run":1,"program":"for (;;) {}","namespaces":[]}` + "\n" + `{"type":"run","run":1,"program":"","namespaces":[]}` + "\n",
 	} {
 		t.Run(name, func(t *testing.T) {

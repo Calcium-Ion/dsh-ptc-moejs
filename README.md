@@ -15,7 +15,9 @@ A PTC runtime for the DeepSeek Harness that runs the model's programs in moejs, 
 
 In the PTC mode of the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh), the model answers with a TypeScript program that calls tools. This runtime runs each program in a fresh [moejs](https://github.com/Calcium-Ion/moejs) runtime inside a sidecar process that stays up between programs. A program with three tool calls takes 0.4 ms here, and 110 ms on dsh's Node runtime, which starts a Node process for every program.
 
-Everything a program does to the machine is a tool call, which dsh runs with that tool's own policy, approvals and sandbox. The sidecar itself gets the confinement dsh's Node runtime gives a program: the file sandbox of the Session's policy and the same short environment. A run stops at its deadline, even in an endless loop, and when it goes past its memory budget.
+Programs can wait on timers, import helper modules from the working directory and use `node:path`, `node:util` and `node:timers`, and dsh's workflow tool runs its scripts here too.
+
+Everything a program does to the machine is a tool call, which dsh runs with that tool's own policy, approvals and sandbox. The sidecar itself only reads the code files a program imports, and it gets the confinement dsh's Node runtime gives a program: the file sandbox of the Session's policy and the same short environment. A run stops at its deadline, even in an endless loop, and when it goes past its memory budget.
 
 ## Performance
 
@@ -65,7 +67,7 @@ The busy agent spends 10.3 minutes of its 8 hours in `run_code` on the Node runt
 
 ### Every effect is a tool call
 
-A program can call the tools dsh gives it and write to `console`. To read a file, run a command or fetch a page, it calls a tool, and dsh runs that call through its tool pipeline with the tool's own policy, approvals and sandbox, as it does for the Node runtime. dsh's session log records each call.
+A program can call the tools dsh gives it and write to `console`. To read a file, run a command or fetch a page, it calls a tool, and dsh runs that call through its tool pipeline with the tool's own policy, approvals and sandbox, as it does for the Node runtime. dsh's session log records each call. The one thing the sidecar reads itself is a code file that the program imports, under the sandbox of the run's policy.
 
 ### The Node runtime's sandbox
 
@@ -79,7 +81,7 @@ The sidecar runs under the same confinement as the Node runtime's program proces
 
 On Linux the plugin opens the sidecar's binary itself and the sandboxed sidecar runs from that open file, so it starts even where the sandbox hides the binary's directory, as bubblewrap hides /tmp under workspace-write. `ps` lists such a sidecar as `/proc/self/fd/3`.
 
-Each file policy in use has its own sidecar, which Sessions with the same mode and workspace root share. The sandbox applies to the sidecar process. The program has no file, network or process access of its own, so the policy decides what a tool call may do, not what the program does.
+Each file policy in use has its own sidecar, which Sessions with the same mode and workspace root share. The sandbox applies to the sidecar process. Apart from reading the files it imports, the program has no file, network or process access of its own, so the policy decides what a tool call may do, not what the program does.
 
 The plugin starts the sandboxed command itself. dsh's subprocess service, which starts the Node runtime's processes, also puts each one in a systemd scope behind a Node bootstrap on Linux, so that it can reap the child processes a program leaves behind. That adds about 80 ms to a start, and the sidecar starts no child processes. The sidecar always runs on the host that runs dsh: in a deployment whose execution world is another host, such as one over SSH, a restricted mode fails with `sandbox-unavailable`.
 
@@ -95,15 +97,54 @@ A run may allocate 512 MiB by default, garbage included. A deadline, an abort fr
 
 Programs are TypeScript with erasable syntax, the rule dsh's Node runtime applies: the types are removed, and `enum`, namespaces with values and parameter properties are syntax errors. A program is the body of an async function, so `await` and `return` work at its top level.
 
+### Timers
+
+`setTimeout`, `setInterval`, `setImmediate` and their clear functions work as they do in Node, with `Timeout` objects that have `ref`, `unref`, `hasRef`, `refresh` and `close`, and `node:timers/promises` gives their promise forms. A program can wait between tool calls, poll or retry with a backoff:
+
+```ts
+const { setTimeout: sleep } = await import("node:timers/promises");
+for (let attempt = 1; attempt <= 10; attempt++) {
+  const status = await tools.bash({ description: "Check the build", command: "cat build/status" });
+  if (status.stdout?.text.trim() === "done") return "built";
+  await sleep(2000);
+}
+return "still building";
+```
+
+Timer callbacks run in the program's runtime, so they count toward its memory budget and its deadline. Timers that are still pending when the program returns never run, as the Node runtime's process ends with the program.
+
+### Modules
+
+A program loads modules with `await import(...)`:
+
+- `.ts`, `.mts`, `.js` and `.mjs` files of the working directory, named with their extension by a path relative to it, an absolute path or a `file:` URL. An imported module can import other files with `import` declarations and use `console` and the timers. It gets the tool bindings from the program, as arguments.
+- `node:path`, `node:util`, `node:timers`, `node:timers/promises` and `node:vm`, also without the `node:` prefix.
+- `data:` URLs of JavaScript.
+
+```ts
+const { summarize } = await import("./scripts/summarize.ts");
+return await summarize(tools, "docs/");
+```
+
+The sidecar reads an imported file itself, under the run's sandbox, and compiles it once for each content it has: a later run that imports the same unchanged file skips the compile. A path outside the working directory, a symbolic link that leads out of it, a package name, a JSON file and the other Node modules fail with an error that says why. Files load only when dsh's execution world is the host that runs dsh. Where it is another host, such as one over SSH, the built-in modules still load.
+
+### Workflows
+
+dsh's workflow tool runs on this runtime. Its guest loads from a `data:` URL and runs each workflow script through `node:vm`, which runs the script in the program's own runtime, with the context's properties as its global names. The scripts call `agent()`, `parallel()`, `pipeline()`, `phase()` and `log()` as they do on the Node runtime.
+
 ### One static binary
 
 The sidecar is a self-contained Go binary built with `CGO_ENABLED=0`. The package manager installs the binary for your platform as an optional dependency.
 
 ## Differences from the Node runtime
 
-Programs get the JavaScript standard library and the tools. `require`, `import`, `process`, `Buffer`, `fs` and `setTimeout` are undefined in a program, and a program that needs a file asks the `read` tool for it. If your programs use Node APIs, keep dsh's Node runtime for that profile.
+Programs get the JavaScript standard library, the tools, Node's timers and five Node modules: `node:path`, `node:util`, `node:timers`, `node:timers/promises` and `node:vm`. `require`, `process`, `Buffer`, `fs`, packages and the other Node modules are not available, and a program that needs the content of a file asks the `read` tool for it. If your programs use other Node APIs, keep dsh's Node runtime for that profile.
 
-`run_code` takes `sandbox_permissions` and `justification` as it does on the Node runtime, and an approved request runs the program in a sidecar under the wider mode. The program does no file access of its own, so that approval lets it do nothing more. When the file sandbox denies a tool call, the program retries that call with `sandbox_permissions` and `justification` among its arguments, and you approve each such call. On the Node runtime, an approval for `run_code` also covers the file operations a program does itself through Node APIs.
+On the Node runtime, `import("./helper.ts")` in a program resolves against dsh's own bootstrap file, so programs there import files by their absolute path. Both forms work here, and a relative path resolves against the working directory.
+
+`node:vm` runs a script in the program's own runtime. The `timeout` option of a script is not enforced, and the run's deadline stops a script that does not end. The `var` and `function` declarations of a script stay in the script, and an assignment to a name the context does not have creates a global of the program's runtime, where Node puts both on the context. A workflow that loops forever therefore ends as a `timeout` of its `run_code` call, where the Node runtime reports the script's own timeout. Stack frames of such a script name `node:vm` instead of the script's file name.
+
+`run_code` takes `sandbox_permissions` and `justification` as it does on the Node runtime, and an approved request runs the program in a sidecar under the wider mode. Apart from reading the files it imports, the program does no file access of its own, so that approval lets it do nothing more. When the file sandbox denies a tool call, the program retries that call with `sandbox_permissions` and `justification` among its arguments, and you approve each such call. On the Node runtime, an approval for `run_code` also covers the file operations a program does itself through Node APIs.
 
 ## Quick start
 
@@ -149,13 +190,14 @@ Options go on the `ptc-moejs` row of the same patch:
 | `maxLogBytes` | 16 MiB | Bytes of console output a run keeps, counted as the JSON array dsh stores. Output past it is dropped, a marker line ends the logs, and the run goes on. |
 | `maxValueBytes` | 16 MiB | Bytes of the returned value as JSON. A larger value fails the run with `output-limit`. Error messages are cut to this size. |
 | `maxPendingCalls` | 128 | Tool calls a run may have in flight at once. One more fails the run with `protocol`. |
+| `maxPendingTimers` | 65536 | Timers and immediates a run may have pending at once. One more throws a `RangeError` in the program. |
 | `maxFrameBytes` | 64 MiB | The largest message between dsh and the sidecar: a program, the arguments of a tool call or one tool result. A larger tool result reaches the program as a rejected call. |
 
 The deadline defaults follow dsh's Node runtime. dsh spills tool results longer than 12,500 tokens to a file, so the log and value budgets are limits on memory use.
 
 ## What a program sees
 
-A program is the body of an async function. Its parameters are the binding namespaces dsh passes (`tools` in PTC mode), the error class of each namespace (`ToolCallError`, which carries the tool's name in `toolName`) and `console` with `log`, `info`, `warn`, `error` and `debug`. The rest is the JavaScript standard library, which in moejs includes `TextEncoder`, `TextDecoder`, `atob`, `btoa`, `structuredClone` and `queueMicrotask`.
+A program is the body of an async function. Its parameters are the binding namespaces dsh passes (`tools` in PTC mode), the error class of each namespace (`ToolCallError`, which carries the tool's name in `toolName`) and `console` with `log`, `info`, `warn`, `error` and `debug`. `console` is also a global, as are `setTimeout`, `setInterval`, `setImmediate` and their clear functions, so the modules a program imports can use them; the binding namespaces are not. The rest is the JavaScript standard library, which in moejs includes `TextEncoder`, `TextDecoder`, `atob`, `btoa`, `structuredClone` and `queueMicrotask`.
 
 The model writes a program like this one, and the runtime hands the returned value to dsh:
 
@@ -168,7 +210,7 @@ The returned value goes back to dsh as lossless JSON: plain objects, arrays, str
 
 | Failure kind | When |
 |---|---|
-| `exception` | The program throws, has a syntax error, or uses TypeScript that changes run-time behaviour, such as `enum`. |
+| `exception` | The program or a timer callback throws, a promise rejects and nothing handles it, the program has a syntax error, or it uses TypeScript that changes run-time behaviour, such as `enum`. |
 | `timeout` | The deadline passes, or the program allocates more than `memoryLimitMb`. |
 | `abort` | dsh cancels the run, the profile shuts the runtime down, or the Session's file mode changes. |
 | `invalid-output` | The returned value is not lossless JSON. |
@@ -184,10 +226,11 @@ A result also carries the facts of the sandbox the sidecar ran in, as on the Nod
 - Every call starts with a fresh runtime. A persistent mode that keeps variables between calls, like the Node runtime's REPL mode, is planned for a later version.
 - The memory budget counts what a run allocates, garbage included. A long run that builds and drops a lot of data can stop before its live data reaches the budget.
 - Values nest up to 10,000 levels deep in both directions, the depth moejs's JSON reader and writer handle.
-- `console` output imitates Node's `util.inspect` for strings, numbers, plain objects, arrays, `Map`, `Set`, errors and class instances, and breaks a line at 72 characters.
+- `console` renders values with a port of Node 22's `util.inspect`, with the options dsh's Node runtime gives it: depth 4, 100 items and 10,000 characters of a string. Node 24 writes the symbol keys of an object without brackets. Node's `util.inspect` shows a proxy's target with `showProxy`, and the entries of an iterator and of a `WeakMap`, which moejs does not expose.
+- A run imports at most 256 files, each up to 1 MiB and 8 MiB in all. moejs has no import attributes, so JSON modules are not available. The program is the body of a function, so it imports with `import()`, and `import` declarations work in the modules it imports.
 - moejs interrupts running JavaScript, and a compile runs to its end once it starts. A program that takes long to parse still ends at its deadline for dsh, and the sidecar drops the run once the parse returns.
-- If a tool call that the program never awaits fails, the failure stays in that unread promise.
-- dsh's workflow tool loads its program with `import()`, which this runtime does not have, so workflows need the Node runtime.
+- A promise that rejects with no handler by the time the promise jobs of its callback run out fails the run, as an unhandled rejection ends the Node runtime's process. A tool call that the program never awaits fails the run that way when the tool fails, and so does an exception in an `async` timer callback. The message starts with `Uncaught (in promise)`.
+- The columns of the stack frames on a program's first line count from the start of the function the program is the body of. The message of a failed run and `console` give the program's own columns; an error's `stack`, read by the program itself, still counts from the function.
 - CI runs the tests on Linux x64, Linux arm64, macOS arm64 and Windows x64 for every push. macOS x64 is untested: its binary is cross-compiled from the same source.
 
 ## Development
@@ -208,4 +251,4 @@ Building the sidecar takes Go 1.25 or later, with `CGO_ENABLED=0`. The tests mou
 
 ## License
 
-MIT. The sidecar binary in each platform package also contains moejs (Apache License 2.0) and the Go standard library (BSD 3-Clause License). Their license texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), which ships with each platform package.
+MIT. The sidecar binary in each platform package also contains moejs (Apache License 2.0), the Go standard library (BSD 3-Clause License) and ports of Node.js's `path` module and `util.inspect` (MIT License). Their license texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), which ships with each platform package.

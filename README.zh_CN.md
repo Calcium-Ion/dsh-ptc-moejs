@@ -15,7 +15,9 @@ DeepSeek Harness 的 PTC 运行时，用 Go 写的 JavaScript 引擎 moejs 运�
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）的 PTC 模式下，模型给出一段调用工具的 TypeScript 程序。这个运行时让 sidecar 进程常驻，每段程序在里面拿到一个新的 [moejs](https://github.com/Calcium-Ion/moejs) 运行时。调用三次工具的程序在这里用时 0.4 ms。dsh 的 Node 运行时每段程序都要启动一个 Node 进程，同样的程序用时 110 ms。
 
-程序对机器做的每件事都是一次工具调用，dsh 按该工具自己的策略、审批和沙箱执行这次调用。sidecar 本身受到的限制和 dsh 的 Node 运行时给程序的一样：会话文件策略的沙箱，以及同样精简的环境变量。运行到了截止时间就会停下，死循环里也一样，分配的内存超过预算时也会停下。
+程序可以等待定时器，可以从工作目录导入辅助模块，可以用 `node:path`、`node:util` 和 `node:timers`。dsh 的 workflow 工具也能在这里运行它的脚本。
+
+程序对机器做的每件事都是一次工具调用，dsh 按该工具自己的策略、审批和沙箱执行这次调用。sidecar 本身只读取程序导入的代码文件，它受到的限制和 dsh 的 Node 运行时给程序的一样：会话文件策略的沙箱，以及同样精简的环境变量。运行到了截止时间就会停下，死循环里也一样，分配的内存超过预算时也会停下。
 
 ## 性能
 
@@ -65,7 +67,7 @@ DeepSeek Harness 的 PTC 运行时，用 Go 写的 JavaScript 引擎 moejs 运�
 
 ### 对机器的每次操作都是工具调用
 
-程序能调用 dsh 提供的工具，能向 `console` 输出。读文件、执行命令、抓取网页都要调用工具，dsh 用工具流水线执行这次调用，由该工具自己的策略、审批和沙箱处理，和 Node 运行时一样。dsh 的会话日志记录每一次调用。
+程序能调用 dsh 提供的工具，能向 `console` 输出。读文件、执行命令、抓取网页都要调用工具，dsh 用工具流水线执行这次调用，由该工具自己的策略、审批和沙箱处理，和 Node 运行时一样。dsh 的会话日志记录每一次调用。sidecar 自己读取的只有程序导入的代码文件，读取时受这次运行的策略的沙箱限制。
 
 ### 和 Node 运行时一样的沙箱
 
@@ -79,7 +81,7 @@ sidecar 受到的限制和 Node 运行时的程序进程相同：
 
 在 Linux 上，插件自己打开 sidecar 的二进制文件，加了沙箱的 sidecar 从这个打开的文件运行，所以即使沙箱藏起了二进制所在的目录（比如 workspace-write 下 bubblewrap 会把 /tmp 换成空目录），sidecar 也能启动。这样的 sidecar 在 `ps` 里显示为 `/proc/self/fd/3`。
 
-每个在用的文件策略有自己的 sidecar，模式和工作区根目录相同的会话共用一个。沙箱作用在 sidecar 进程上。程序自己不能访问文件、网络和进程，所以策略决定的是工具调用能做什么，而不是程序本身做什么。
+每个在用的文件策略有自己的 sidecar，模式和工作区根目录相同的会话共用一个。沙箱作用在 sidecar 进程上。除了读取它导入的文件，程序自己不能访问文件、网络和进程，所以策略决定的是工具调用能做什么，而不是程序本身做什么。
 
 加了沙箱的命令由插件自己启动。dsh 的子进程服务启动 Node 运行时的进程时，在 Linux 上还会先建一个 systemd scope、经过一个 Node 引导进程，用来回收程序留下的子进程。这会让每次启动多花约 80 ms，而 sidecar 不会启动子进程。sidecar 总是运行在运行 dsh 的这台机器上：执行环境在另一台机器上的部署（例如通过 SSH）里，受限模式会以 `sandbox-unavailable` 失败。
 
@@ -95,15 +97,54 @@ sidecar 受到的限制和 Node 运行时的程序进程相同：
 
 程序是只用可擦除语法的 TypeScript，规则和 dsh 的 Node 运行时相同：类型标注被删掉，`enum`、带值的 namespace 和参数属性都是语法错误。程序是一个 async 函数的函数体，顶层可以用 `await` 和 `return`。
 
+### 定时器
+
+`setTimeout`、`setInterval`、`setImmediate` 和对应的 clear 函数和 Node 里的一样，`Timeout` 对象有 `ref`、`unref`、`hasRef`、`refresh` 和 `close`，`node:timers/promises` 提供它们的 promise 形式。程序可以在两次工具调用之间等待、轮询，或者按退避间隔重试：
+
+```ts
+const { setTimeout: sleep } = await import("node:timers/promises");
+for (let attempt = 1; attempt <= 10; attempt++) {
+  const status = await tools.bash({ description: "Check the build", command: "cat build/status" });
+  if (status.stdout?.text.trim() === "done") return "built";
+  await sleep(2000);
+}
+return "still building";
+```
+
+定时器回调在程序的运行时里执行，所以算进它的内存预算和截止时间。程序返回时还没触发的定时器不会再执行，就像 Node 运行时的进程随程序一起结束一样。
+
+### 模块
+
+程序用 `await import(...)` 加载模块：
+
+- 工作目录下的 `.ts`、`.mts`、`.js` 和 `.mjs` 文件，写出扩展名，用相对工作目录的路径、绝对路径或 `file:` URL 指定。被导入的模块可以用 `import` 声明导入其他文件，可以用 `console` 和定时器。工具绑定由程序作为参数传给它。
+- `node:path`、`node:util`、`node:timers`、`node:timers/promises` 和 `node:vm`，不写 `node:` 前缀也可以。
+- JavaScript 的 `data:` URL。
+
+```ts
+const { summarize } = await import("./scripts/summarize.ts");
+return await summarize(tools, "docs/");
+```
+
+被导入的文件由 sidecar 自己读取，读取时受这次运行的沙箱限制。同一份内容只编译一次：之后的运行导入同一个没改过的文件时不再编译。工作目录之外的路径、指向工作目录之外的符号链接、包名、JSON 文件和其他 Node 模块都会失败，错误消息说明原因。只有 dsh 的执行环境就是运行 dsh 的这台机器时，才能加载文件。执行环境在另一台机器上时（例如通过 SSH），内置模块仍然可以加载。
+
+### Workflow
+
+dsh 的 workflow 工具可以在这个运行时上运行。它的 guest 从 `data:` URL 加载，通过 `node:vm` 运行每个 workflow 脚本。这里的 `node:vm` 在程序自己的运行时里运行脚本，context 对象的属性就是脚本的全局变量。脚本里的 `agent()`、`parallel()`、`pipeline()`、`phase()` 和 `log()` 和在 Node 运行时上一样。
+
 ### 一个静态程序
 
 sidecar 是用 `CGO_ENABLED=0` 构建的自包含 Go 程序。包管理器以可选依赖的形式安装对应平台的程序。
 
 ## 和 Node 运行时的区别
 
-程序能用 JavaScript 标准库和工具。`require`、`import`、`process`、`Buffer`、`fs` 和 `setTimeout` 在程序里都是 undefined，程序要读文件时调用 `read` 工具。如果你的程序要用 Node API，这个 profile 继续用 dsh 的 Node 运行时。
+程序能用 JavaScript 标准库、工具、Node 的定时器和五个 Node 模块：`node:path`、`node:util`、`node:timers`、`node:timers/promises` 和 `node:vm`。`require`、`process`、`Buffer`、`fs`、包和其他 Node 模块都用不了，程序要读文件内容时调用 `read` 工具。如果你的程序要用其他 Node API，这个 profile 继续用 dsh 的 Node 运行时。
 
-`run_code` 和在 Node 运行时上一样接受 `sandbox_permissions` 和 `justification`，批准后程序在放宽模式的 sidecar 里运行。程序自己不做文件访问，所以这次批准不会让它多做任何事。文件沙箱拒绝某次工具调用时，程序在这次调用的参数里带上 `sandbox_permissions` 和 `justification` 重试，每次这样的调用都要你批准。用 Node 运行时的话，对 `run_code` 的批准还会放行程序通过 Node API 自己做的文件操作。
+在 Node 运行时上，程序里的 `import("./helper.ts")` 相对 dsh 自己的引导文件解析，所以那里的程序要用绝对路径导入文件。这里两种写法都可以，相对路径相对工作目录解析。
+
+`node:vm` 在程序自己的运行时里运行脚本。脚本的 `timeout` 选项不生效，不会结束的脚本由这次运行的截止时间停止。脚本里的 `var` 和 `function` 声明留在脚本自己的作用域里，给 context 上没有的名字赋值会在程序的运行时里创建全局变量，而 Node 会把这两者都放到 context 上。所以死循环的 workflow 会以它的 `run_code` 调用的 `timeout` 结束，而 Node 运行时报告的是脚本自己的超时。这类脚本的栈帧显示的是 `node:vm`，而不是脚本的文件名。
+
+`run_code` 和在 Node 运行时上一样接受 `sandbox_permissions` 和 `justification`，批准后程序在放宽模式的 sidecar 里运行。除了读取它导入的文件，程序自己不做文件访问，所以这次批准不会让它多做任何事。文件沙箱拒绝某次工具调用时，程序在这次调用的参数里带上 `sandbox_permissions` 和 `justification` 重试，每次这样的调用都要你批准。用 Node 运行时的话，对 `run_code` 的批准还会放行程序通过 Node API 自己做的文件操作。
 
 ## 快速上手
 
@@ -149,13 +190,14 @@ dsh plugin --profile web add dsh-ptc-moejs
 | `maxLogBytes` | 16 MiB | 一次运行保留的 console 输出字节数，按 dsh 存储的 JSON 数组计算。超出部分被丢弃，日志以一行标记结尾，运行继续。 |
 | `maxValueBytes` | 16 MiB | 返回值序列化成 JSON 后的字节数。更大的值让运行以 `output-limit` 失败。错误消息也截断到这个长度。 |
 | `maxPendingCalls` | 128 | 一次运行同时进行中的工具调用数。再多一个，运行以 `protocol` 失败。 |
+| `maxPendingTimers` | 65536 | 一次运行同时挂着的定时器和 immediate 数。再多一个，程序里抛出 `RangeError`。 |
 | `maxFrameBytes` | 64 MiB | dsh 和 sidecar 之间单条消息的上限：一段程序、一次工具调用的参数或一个工具结果。更大的工具结果在程序里表现为被拒绝的调用。 |
 
 截止时间的默认值和 dsh 的 Node 运行时一致。dsh 会把超过 12,500 token 的工具结果转存到文件，所以日志和返回值的预算用来限制内存占用。
 
 ## 程序能看到什么
 
-程序是一个 async 函数的函数体。函数的参数有 dsh 传入的绑定命名空间（PTC 模式下是 `tools`）、每个命名空间的错误类（`ToolCallError`，`toolName` 属性里是工具名），以及带 `log`、`info`、`warn`、`error`、`debug` 的 `console`。其余是 JavaScript 标准库，moejs 的标准库里有 `TextEncoder`、`TextDecoder`、`atob`、`btoa`、`structuredClone` 和 `queueMicrotask`。
+程序是一个 async 函数的函数体。函数的参数有 dsh 传入的绑定命名空间（PTC 模式下是 `tools`）、每个命名空间的错误类（`ToolCallError`，`toolName` 属性里是工具名），以及带 `log`、`info`、`warn`、`error`、`debug` 的 `console`。`console` 也是全局变量，`setTimeout`、`setInterval`、`setImmediate` 和对应的 clear 函数也是，所以程序导入的模块也能用它们；绑定命名空间不是全局变量。其余是 JavaScript 标准库，moejs 的标准库里有 `TextEncoder`、`TextDecoder`、`atob`、`btoa`、`structuredClone` 和 `queueMicrotask`。
 
 模型写出的程序是这样的，运行时把返回值交给 dsh：
 
@@ -168,7 +210,7 @@ return { head: head.stdout?.text };
 
 | 失败类型 | 什么时候出现 |
 |---|---|
-| `exception` | 程序抛出异常、有语法错误，或者用了会改变运行行为的 TypeScript，例如 `enum`。 |
+| `exception` | 程序或定时器回调抛出异常、有 promise 被拒绝却没有处理、程序有语法错误，或者用了会改变运行行为的 TypeScript，例如 `enum`。 |
 | `timeout` | 超过截止时间，或者分配的内存超过 `memoryLimitMb`。 |
 | `abort` | dsh 取消了这次运行、profile 关闭了运行时，或者会话的文件模式改变了。 |
 | `invalid-output` | 返回值不是无损 JSON。 |
@@ -184,10 +226,11 @@ return { head: head.stdout?.text };
 - 每次调用都从新的运行时开始。在调用之间保留变量的持久模式（类似 Node 运行时的 REPL 模式）计划在以后的版本中加入。
 - 内存预算统计的是一次运行分配的内存，垃圾也算在内。一次运行如果反复创建又丢弃大量数据，可能在存活数据达到预算之前就被停止。
 - 两个方向的值最多嵌套 10,000 层，这是 moejs 的 JSON 读写能处理的深度。
-- `console` 的输出仿照 Node 的 `util.inspect`，覆盖字符串、数字、普通对象、数组、`Map`、`Set`、错误和类的实例，单行超过 72 个字符时换行。
+- `console` 用移植自 Node 22 的 `util.inspect` 渲染值，选项和 dsh 的 Node 运行时一样：深度 4、100 项、字符串 10,000 个字符。Node 24 写对象的 symbol 键时不带方括号。Node 的 `util.inspect` 能用 `showProxy` 显示 proxy 的目标，能显示迭代器和 `WeakMap` 的条目，moejs 不提供这些。
+- 一次运行最多导入 256 个文件，每个最大 1 MiB，合计最大 8 MiB。moejs 没有 import attributes，所以没有 JSON 模块。程序是函数体，所以程序里用 `import()` 导入，`import` 声明在被导入的模块里可以用。
 - moejs 的中断作用于正在运行的 JavaScript，编译一旦开始会一直进行到结束。解析很慢的程序到截止时间时，dsh 一侧照常结束这次运行，sidecar 等解析返回后丢弃它。
-- 程序没有 await 的工具调用如果失败，这个失败只留在那个没人读取的 promise 里。
-- dsh 的 workflow 工具用 `import()` 加载它的程序，这个运行时没有 `import()`，所以 workflow 要用 Node 运行时。
+- 一个 promise 被拒绝后，到它所在回调的 promise 任务跑完时仍没有处理函数，这次运行就会失败，就像未处理的拒绝会结束 Node 运行时的进程一样。程序没有 await 的工具调用在工具失败时会这样让运行失败，`async` 定时器回调里的异常也一样。消息以 `Uncaught (in promise)` 开头。
+- 程序第一行上的栈帧，列号从程序所在函数的开头算起。运行失败的消息和 `console` 给出的是程序自己的列号；程序自己读取的错误 `stack` 仍从函数开头算。
 - CI 每次推送都在 Linux x64、Linux arm64、macOS arm64 和 Windows x64 上跑测试。macOS x64 还没测过，它的程序由同一份源码交叉编译。
 
 ## 开发
@@ -208,4 +251,4 @@ pnpm run build:binaries  # 五个平台的程序
 
 ## 许可证
 
-MIT。各平台包里的常驻进程二进制还包含 moejs（Apache License 2.0）和 Go 标准库（BSD 3-Clause License），它们的许可证原文在 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 里，随每个平台包一起发布。
+MIT。各平台包里的常驻进程二进制还包含 moejs（Apache License 2.0）、Go 标准库（BSD 3-Clause License）以及移植自 Node.js 的 `path` 模块和 `util.inspect`（MIT License），它们的许可证原文在 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 里，随每个平台包一起发布。

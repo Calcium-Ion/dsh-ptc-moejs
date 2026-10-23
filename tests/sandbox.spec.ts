@@ -7,7 +7,7 @@
 import { spawn } from 'node:child_process'
 import type { ChildProcess, SpawnOptions } from 'node:child_process'
 import { readFileSync, readdirSync, readlinkSync } from 'node:fs'
-import { chmod, copyFile, mkdtemp, rm } from 'node:fs/promises'
+import { chmod, copyFile, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -219,13 +219,13 @@ describe('idle sidecars', () => {
   it('ends a sidecar with no runs after the idle period and starts a new one for the next run', async () => {
     const root = await workspace()
     const { ctx } = await setup()
-    const budgets = { memoryLimitBytes: 64 << 20, maxLogBytes: 1 << 20, maxValueBytes: 1 << 20, maxPendingCalls: 8, maxFrameBytes: 4 << 20 }
+    const budgets = { memoryLimitBytes: 64 << 20, maxLogBytes: 1 << 20, maxValueBytes: 1 << 20, maxPendingCalls: 8, maxPendingTimers: 64, maxFrameBytes: 4 << 20 }
     const sidecar = new Sidecar(() => launchSidecar(ctx, binary, { mode: 'workspace-write', workspaceRoot: root }), budgets, 50)
     onTestFinished(async () => { await sidecar.close('test finished') })
-    expect((await sidecar.execute('return 1', new Map(), { timeoutMs: 5_000 })).value).toBe(1)
+    expect((await sidecar.execute('return 1', new Map(), { timeoutMs: 5_000, cwd: root })).value).toBe(1)
     const first = spawns.mock.results[spawns.mock.calls.findIndex(([, , options]) => (options as SpawnOptions).cwd === root)]!.value as ChildProcess
     if (first.exitCode === null && first.signalCode === null) await new Promise<void>((resolve) => { first.once('exit', () => { resolve() }) })
-    expect((await sidecar.execute('return 2', new Map(), { timeoutMs: 5_000 })).value).toBe(2)
+    expect((await sidecar.execute('return 2', new Map(), { timeoutMs: 5_000, cwd: root })).value).toBe(2)
     expect(spawnsIn(root)).toHaveLength(2)
   })
 })
@@ -259,15 +259,25 @@ describe.skipIf(!sandboxUsable || process.platform !== 'linux')('a binary the sa
     await chmod(hidden, 0o755)
     const root = await workspace(homedir())
     const { ctx } = await mountRuntime({}, { mode: 'workspace-write', workspaceRoot: root })
-    const budgets = { memoryLimitBytes: 64 << 20, maxLogBytes: 1 << 20, maxValueBytes: 1 << 20, maxPendingCalls: 8, maxFrameBytes: 4 << 20 }
+    const budgets = { memoryLimitBytes: 64 << 20, maxLogBytes: 1 << 20, maxValueBytes: 1 << 20, maxPendingCalls: 8, maxPendingTimers: 64, maxFrameBytes: 4 << 20 }
     const sidecar = new Sidecar(() => launchSidecar(ctx, hidden, { mode: 'workspace-write', workspaceRoot: root }), budgets)
     onTestFinished(async () => { await sidecar.close('test finished') })
-    expect(await sidecar.execute('return "started"', new Map(), { timeoutMs: 5_000 })).toEqual({ logs: [], value: 'started' })
+    expect(await sidecar.execute('return "started"', new Map(), { timeoutMs: 5_000, cwd: root })).toEqual({ logs: [], value: 'started' })
     expect(sidecar.enforcement).toBeDefined()
   })
 })
 
 describe.skipIf(!sandboxUsable)('the host sandbox', () => {
+  it('lets a confined sidecar import the files of the workspace', async () => {
+    const root = await workspace(homedir())
+    await writeFile(join(root, 'helper.ts'), 'export const greet = (name: string): string => `hello ${name}`\n')
+    const { runtime } = await mountRuntime({}, { mode: 'workspace-write', workspaceRoot: root })
+    const result = await runtime.run(runtime.resolve({ program: 'return (await import("./helper.ts")).greet("sandbox")', bindings: [] }))
+    expect(result.error).toBeUndefined()
+    expect(result.value).toBe('hello sandbox')
+    expect(result.sandbox?.mode).toBe('workspace-write')
+  })
+
   it('runs programs in a confined sidecar that holds none of the host\'s variables', async () => {
     vi.stubEnv('DSH_PTC_MOEJS_TEST_SECRET', 'secret')
     onTestFinished(() => { vi.unstubAllEnvs() })

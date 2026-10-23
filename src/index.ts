@@ -12,6 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { DUNDER_MEMBER, PORTABLE_RESERVED_WORDS, PtcRuntime, RESERVED_BINDING_GLOBALS, RESERVED_ERROR_MEMBERS } from '@deepseek-ai/dsh-ptc-runtime'
 import type { PtcBindingErrorClass, PtcBindingFunction, PtcBindingNamespace, PtcRunRequest, PtcRunResult, PtcRunSandbox, PtcRunSpec } from '@deepseek-ai/dsh-ptc-runtime'
 import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandbox'
+import type {} from '@deepseek-ai/dsh-fs'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import z from '@deepseek-ai/schemastery'
@@ -35,6 +36,8 @@ export interface Config {
   maxValueBytes?: number
   /** Tool calls one run may have in flight at once. */
   maxPendingCalls?: number
+  /** Timers and immediates one run may have pending at once. */
+  maxPendingTimers?: number
   /** Bytes of one frame between host and sidecar: a program, a tool result or tool arguments. */
   maxFrameBytes?: number
 }
@@ -50,6 +53,7 @@ export const MoejsConfig: z<Config> = z.object({
   maxLogBytes: z.number().default(16 * 1024 * 1024).description('Bytes of serialized logs a run keeps; capture stops at the budget.'),
   maxValueBytes: z.number().default(16 * 1024 * 1024).description('Bytes of serialized completion value; a larger value fails as output-limit.'),
   maxPendingCalls: z.number().default(128).description('Tool calls one run may have in flight at once.'),
+  maxPendingTimers: z.number().default(65_536).description('Timers and immediates one run may have pending at once.'),
   maxFrameBytes: z.number().default(64 * 1024 * 1024).description('Bytes of one frame between host and sidecar: a program, a tool result or tool arguments.'),
 })
 
@@ -75,7 +79,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   for (const key of ['timeoutMs', 'maxTimeoutMs'] as const) {
     if (resolved[key] > MAX_TIMER_DELAY_MS) throw new Error(`dsh-ptc-moejs: ${key} must be at most ${MAX_TIMER_DELAY_MS}`)
   }
-  for (const key of ['memoryLimitMb', 'maxLogBytes', 'maxValueBytes', 'maxPendingCalls', 'maxFrameBytes'] as const) {
+  for (const key of ['memoryLimitMb', 'maxLogBytes', 'maxValueBytes', 'maxPendingCalls', 'maxPendingTimers', 'maxFrameBytes'] as const) {
     if (!Number.isSafeInteger(resolved[key])) throw new Error(`dsh-ptc-moejs: ${key} must be an integer`)
   }
   if (!Number.isSafeInteger(resolved.memoryLimitMb * 1024 * 1024)) throw new Error('dsh-ptc-moejs: memoryLimitMb is too large')
@@ -153,6 +157,8 @@ export class MoejsPtcRuntime extends PtcRuntime {
   private readonly binary: string
   /** The deployment's policy, for a run that names none. A new policy service mounts a new runtime. */
   private readonly defaultPolicy: SandboxExecutionPolicy
+  /** Whether dsh's execution world is this host, where the sidecar reads the files a program imports. */
+  private readonly hostWorld: boolean
   /** One sidecar per file policy. Sessions with the same mode and workspace root share it. */
   private readonly sidecars = new Map<string, Sidecar>()
   private readonly sessionRuns = new Set<SessionRun>()
@@ -166,10 +172,12 @@ export class MoejsPtcRuntime extends PtcRuntime {
       maxLogBytes: this.config.maxLogBytes,
       maxValueBytes: this.config.maxValueBytes,
       maxPendingCalls: this.config.maxPendingCalls,
+      maxPendingTimers: this.config.maxPendingTimers,
       maxFrameBytes: this.config.maxFrameBytes,
     }
     this.binary = resolveBinary()
     this.defaultPolicy = Object.freeze(ctx.sandboxPolicy.resolve())
+    this.hostWorld = ctx.fs.processPathFromHostPath(this.binary) === this.binary
     ctx.on('session/event', (session, event) => {
       if (event.type !== 'sandbox/mode') return
       for (const run of this.sessionRuns) {
@@ -188,9 +196,12 @@ export class MoejsPtcRuntime extends PtcRuntime {
   override get executionInstructions(): string {
     return 'The program is the body of an async TypeScript function with erasable syntax: enum and namespaces with values are syntax errors, and type annotations are not checked. '
       + 'Top-level await and return are supported. '
-      + 'The program runs in moejs with the JavaScript standard library, the tool bindings and console.log, info, warn, error and debug. '
-      + 'Node APIs, require, import, process, timers and direct file or network access are absent: use the tools for files, commands and the network. '
-      + 'The program reaches files only through tools, so sandbox_permissions on run_code does not let it do more. '
+      + 'The program runs in moejs with the JavaScript standard library, the tool bindings, console.log, info, warn, error and debug, and setTimeout, setInterval, setImmediate and their clear functions. '
+      + (this.hostWorld
+        ? 'await import("./helpers.ts") loads a .ts, .mts, .js or .mjs file of the working directory, with its extension. Imported modules may import other files and use console and the timers; pass them the tool bindings they need. '
+        : '')
+      + 'await import("node:path"), "node:util", "node:timers" and "node:timers/promises" load those Node modules. Other Node APIs, require, process, packages and direct network access are absent: use the tools for files, commands and the network. '
+      + `${this.hostWorld ? 'Apart from the modules it imports, the' : 'The'} program reaches files only through tools, so sandbox_permissions on run_code does not let it do more. `
       + 'When the sandbox denies a tool call, retry that call with sandbox_permissions and justification in its own arguments. The user approves each such call. '
       + 'Emit output with console.log(...) or return a lossless JSON value: plain objects, arrays, strings, finite numbers, booleans and null. '
       + 'Only printed values and the returned value become program output. '
@@ -250,7 +261,8 @@ export class MoejsPtcRuntime extends PtcRuntime {
     }
     try {
       const sidecar = this.sidecarFor(policy)
-      const result = await sidecar.execute(spec.program, namespaces, { timeoutMs: timeout, signal })
+      const moduleRoot = this.hostWorld ? spec.cwd : undefined
+      const result = await sidecar.execute(spec.program, namespaces, { timeoutMs: timeout, signal, cwd: spec.cwd, moduleRoot })
       const enforcement = sidecar.enforcement
       return { ...result, sandbox: enforcement === undefined ? sandbox : { ...sandbox, enforcement } }
     } finally {
