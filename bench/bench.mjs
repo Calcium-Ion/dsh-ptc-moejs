@@ -5,9 +5,11 @@
 //
 //   DSH_REPO=/path/to/deepseek-harness node bench/bench.mjs [rounds]
 //
-// The Node runtime runs with workspace-write, the default file policy of a
-// dsh Session, which starts each program inside bubblewrap on Linux, and with
-// danger-full-access, which starts the program process directly.
+// Both runtimes mount on dsh's own services (the Node runtime also on its
+// subprocess service) and run with workspace-write, the default file policy
+// of a dsh Session, which starts the Node program process and the moejs
+// sidecar inside bubblewrap on Linux, and with danger-full-access, which
+// starts them directly.
 import { spawn } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
@@ -29,30 +31,35 @@ const functions = {
   bash: () => Promise.resolve({ lines: ['a', 'b'] }),
 }
 const bindings = [{ global: 'tools', functions, errorClass: { name: 'ToolCallError', memberNameProperty: 'toolName' } }]
-const calls = { moejs: 400, 'node-workspace-write': 40, 'node-danger-full-access': 40 }
+const calls = {
+  'moejs-workspace-write': 400,
+  'moejs-danger-full-access': 400,
+  'node-workspace-write': 40,
+  'node-danger-full-access': 40,
+}
 
 async function mount(kind, workspace) {
-  if (kind === 'moejs') {
-    const require = createRequire(join(pluginDir, 'package.json'))
-    const { Context } = await import(pathToFileURL(require.resolve('@deepseek-ai/cordis')).href)
-    const { default: Runtime } = await import(pathToFileURL(join(pluginDir, 'lib/index.js')).href)
-    const ctx = new Context()
-    return { ctx, load: () => ctx.plugin(Runtime, {}) }
+  const moejs = kind.startsWith('moejs-')
+  // Each runtime loads dsh's services from its own install: this checkout's for moejs, the dsh checkout's for Node.
+  let base = pluginDir
+  let runtime = join(pluginDir, 'lib/index.js')
+  if (!moejs) {
+    const repo = process.env.DSH_REPO
+    if (!repo) throw new Error('set DSH_REPO to a built deepseek-harness checkout')
+    base = join(repo, 'packages/ptc-runtime/ptc-runtime-node')
+    runtime = join(base, 'lib/index.js')
   }
-  const repo = process.env.DSH_REPO
-  if (!repo) throw new Error('set DSH_REPO to a built deepseek-harness checkout')
-  const nodeDir = join(repo, 'packages/ptc-runtime/ptc-runtime-node')
-  const require = createRequire(join(nodeDir, 'package.json'))
+  const require = createRequire(join(base, 'package.json'))
   const load = async name => (await import(pathToFileURL(require.resolve(name)).href))
   const { Context } = await load('@deepseek-ai/cordis')
-  const { default: Runtime } = await import(pathToFileURL(join(nodeDir, 'lib/index.js')).href)
+  const { default: Runtime } = await import(pathToFileURL(runtime).href)
   const ctx = new Context()
   await ctx.plugin((await load('@deepseek-ai/dsh-session')).default)
   await ctx.plugin((await load('@deepseek-ai/dsh-fs-local')).default)
-  await ctx.plugin((await load('@deepseek-ai/dsh-subprocess-local')).default)
+  if (!moejs) await ctx.plugin((await load('@deepseek-ai/dsh-subprocess-local')).default)
   await ctx.plugin((await load('@deepseek-ai/dsh-sandbox-local')).default, {})
   await ctx.plugin((await load('@deepseek-ai/dsh-session-projection')).default)
-  const mode = kind === 'node-workspace-write' ? 'workspace-write' : 'danger-full-access'
+  const mode = kind.endsWith('-workspace-write') ? 'workspace-write' : 'danger-full-access'
   await ctx.plugin((await load('@deepseek-ai/dsh-sandbox-policy')).default, { mode, workspaceRoot: workspace })
   return { ctx, load: () => ctx.plugin(Runtime, {}) }
 }

@@ -112,7 +112,26 @@ async function scenario(runtime) {
   const settles = events.filter(e => e.type === 'tool/ptc-dispatch').map(e => e.data)
   const result = events.find(e => e.type === 'tool/result')?.data.message.content.map(block => block.text).join('\n')
   const turnEnd = events.find(e => e.type === 'turn/end')?.data.reason.kind
-  return { runtime, home, work, exit: headless.code, stdout: headless.stdout.trim(), stderr: headless.stderr.trim(), elapsedMs, requests: mock.records.filter(r => r.type === 'request').length, starts, settles, result, turnEnd }
+  const runCode = findTool(events.filter(e => e.type === 'request/header'), 'run_code')
+  const runCodeParameters = Object.keys(runCode?.parameters?.properties ?? runCode?.input_schema?.properties ?? {}).sort()
+  return { runtime, home, work, exit: headless.code, stdout: headless.stdout.trim(), stderr: headless.stderr.trim(), elapsedMs, requests: mock.records.filter(r => r.type === 'request').length, starts, settles, result, turnEnd, runCodeParameters }
+}
+
+/** The first tool definition with this name anywhere in the logged request headers. */
+function findTool(value, name) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findTool(item, name)
+      if (found !== undefined) return found
+    }
+  } else if (typeof value === 'object' && value !== null) {
+    if (value.name === name && (value.parameters !== undefined || value.input_schema !== undefined)) return value
+    for (const item of Object.values(value)) {
+      const found = findTool(item, name)
+      if (found !== undefined) return found
+    }
+  }
+  return undefined
 }
 
 const results = []
@@ -135,9 +154,12 @@ check('both runtimes dispatched the same calls with the same arguments', JSON.st
 const contents = r => JSON.stringify(r.settles.map(s => s.content)).replaceAll(r.work, '<work>')
 check('both runtimes recorded the same tool contents', contents(moejs) === contents(node))
 check('both runtimes gave the model the same run_code result', moejs.result === node.result)
+// Both runtimes take the Session's file policy, so run_code offers the same controls, sandbox escalation included.
+check('both runtimes offered run_code with the same parameters', moejs.runCodeParameters.length > 0 && moejs.runCodeParameters.join() === node.runCodeParameters.join())
 
 for (const r of results) {
   console.log(`\n== ${r.runtime} (${r.elapsedMs} ms)`)
+  console.log(`  run_code parameters: ${r.runCodeParameters.join(', ')}`)
   for (const s of r.settles) console.log(`  ${s.subCallId}  ${s.name}(${JSON.stringify(s.arguments)})  isError=${s.isError}`)
   console.log(`  run_code result:\n${r.result.split('\n').map(line => `    ${line}`).join('\n')}`)
   if (r.exit !== 0) console.log(`  stderr: ${r.stderr}`)

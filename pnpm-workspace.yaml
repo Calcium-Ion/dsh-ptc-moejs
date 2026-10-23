@@ -1,2 +1,7 @@
 packages:
   - npm/*
+# pnpm stops an install at any unreviewed install script. koffi comes with
+# dsh's own packages, which the tests mount, and dsh allows its script too:
+# dsh's Windows file and sandbox code calls Win32 through it.
+allowBuilds:
+  koffi: true

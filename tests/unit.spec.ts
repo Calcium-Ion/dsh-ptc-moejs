@@ -1,17 +1,12 @@
-import { Context } from '@deepseek-ai/cordis'
 import type { PtcBindingNamespace } from '@deepseek-ai/dsh-ptc-runtime'
-import { describe, expect, it, onTestFinished } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { binaryPackage, resolveBinary } from '../src/binary.ts'
-import MoejsPtcRuntime, { resolveConfig, validateBindings } from '../src/index.ts'
+import { resolveConfig, validateBindings } from '../src/index.ts'
 import type { Config } from '../src/index.ts'
 import { LogLedger, TRUNCATION_MARKER, capMessage, failureResult, jsonBytes, parseFrame, successResult } from '../src/protocol.ts'
+import { mountRuntime } from './setup.ts'
 
-async function mount(config: Config = {}) {
-  const ctx = new Context()
-  const fiber = await ctx.plugin(MoejsPtcRuntime, config)
-  onTestFinished(async () => { await ctx.fiber.dispose() })
-  return { ctx, fiber, runtime: ctx.ptcRuntime as MoejsPtcRuntime }
-}
+const mount = (config: Config = {}) => mountRuntime(config)
 
 const noop = () => Promise.resolve(null)
 
@@ -44,9 +39,7 @@ describe('configuration', () => {
   })
 
   it('rejects an invalid configuration at load', async () => {
-    const ctx = new Context()
-    onTestFinished(async () => { await ctx.fiber.dispose() })
-    await expect(Promise.resolve(ctx.plugin(MoejsPtcRuntime, { maxPendingCalls: 0 }))).rejects.toThrow('maxPendingCalls must be a positive finite number')
+    await expect(mountRuntime({ maxPendingCalls: 0 })).rejects.toThrow('maxPendingCalls must be a positive finite number')
   })
 })
 
@@ -78,12 +71,18 @@ describe('resolve', () => {
     expect(() => runtime.resolve({ program: '', bindings: [], timeoutMs })).toThrow('timeoutMs must be a positive finite number')
   })
 
-  it('rejects a relative directory and an explicit sandbox policy', async () => {
+  it('rejects a relative directory', async () => {
     const { runtime } = await mount()
     expect(() => runtime.resolve({ program: '', bindings: [], cwd: 'relative/dir' })).toThrow('cwd must be absolute')
-    expect(() => runtime.resolve({
-      program: '', bindings: [], sandboxPolicy: { mode: 'read-only', workspaceRoot: '/tmp' } as never,
-    })).toThrow('rejects an explicit sandboxPolicy')
+  })
+
+  it('fills in the deployment policy and keeps a policy the caller resolved, as the Node runtime does', async () => {
+    const { runtime } = await mount()
+    expect(runtime.resolve({ program: '', bindings: [] }).sandboxPolicy).toEqual({ mode: 'danger-full-access', workspaceRoot: process.cwd() })
+    const policy = { mode: 'read-only', workspaceRoot: '/srv/work' } as const
+    const spec = runtime.resolve({ program: '', bindings: [], sandboxPolicy: policy })
+    expect(spec.sandboxPolicy).toBe(policy)
+    expect(spec.cwd).toBe('/srv/work')
   })
 
   it('refuses requests after disposal', async () => {
@@ -96,18 +95,20 @@ describe('resolve', () => {
 
   it('rejects a spec that resolve did not produce', async () => {
     const { runtime } = await mount({ maxTimeoutMs: 1_000 })
-    await expect(runtime.run({ program: '', bindings: [], cwd: 'here', timeoutMs: 10 })).rejects.toThrow('run requires a resolved program, cwd and timeout')
-    await expect(runtime.run({ program: '', bindings: [], cwd: '/', timeoutMs: 5_000 })).rejects.toThrow('run requires a resolved program, cwd and timeout')
+    const sandboxPolicy = { mode: 'danger-full-access', workspaceRoot: '/' } as const
+    await expect(runtime.run({ program: '', bindings: [], cwd: '/', timeoutMs: 10 })).rejects.toThrow('run requires a resolved sandbox policy')
+    await expect(runtime.run({ program: '', bindings: [], cwd: 'here', timeoutMs: 10, sandboxPolicy })).rejects.toThrow('run requires a resolved program, cwd and timeout')
+    await expect(runtime.run({ program: '', bindings: [], cwd: '/', timeoutMs: 5_000, sandboxPolicy })).rejects.toThrow('run requires a resolved program, cwd and timeout')
   })
 
-  it('describes itself as an unconfined TypeScript function-body runtime', async () => {
+  it('describes itself as a TypeScript function-body runtime under the deployment file mode', async () => {
     const { runtime } = await mount({ memoryLimitMb: 256 })
     expect(runtime.language).toBe('typescript')
     expect(runtime.isolation).toBe('process')
     expect(runtime.programFormat).toBe('function-body')
-    expect(runtime.sandboxMode).toBeUndefined()
+    expect(runtime.sandboxMode).toBe('danger-full-access')
     expect(runtime.executionInstructions).toContain('Node APIs, require, import, process, timers and direct file or network access are absent')
-    expect(runtime.executionInstructions).toContain('run_code takes no sandbox_permissions or justification')
+    expect(runtime.executionInstructions).toContain('sandbox_permissions on run_code does not let it do more')
     expect(runtime.executionInstructions).toContain('retry that call with sandbox_permissions and justification in its own arguments')
     expect(runtime.executionInstructions).toContain('256 MiB')
   })

@@ -1,7 +1,7 @@
 {
   "name": "dsh-ptc-moejs",
   "version": "0.1.2",
-  "description": "PTC runtime for the DeepSeek Harness that runs model-written programs in moejs, a pure-Go JavaScript engine, inside one long-lived sidecar process",
+  "description": "PTC runtime for the DeepSeek Harness that runs model-written programs in moejs, a pure-Go JavaScript engine, inside a long-lived sidecar process under dsh's file sandbox",
   "keywords": [
     "dsh-plugin",
     "dsh",
@@ -54,7 +54,8 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.5",
-    "@deepseek-ai/dsh-ptc-runtime": ">=0.2.1-rc.2 <0.3.0"
+    "@deepseek-ai/dsh-ptc-runtime": ">=0.2.1-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-sandbox": ">=0.2.1-rc.2 <0.3.0"
   },
   "dependencies": {
     "@deepseek-ai/dsh-util-values": ">=0.2.1-rc.2 <0.3.0",
@@ -69,7 +70,14 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/dsh-fs": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-fs-local": "0.2.1-rc.2",
     "@deepseek-ai/dsh-ptc-runtime": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-sandbox": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-sandbox-local": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-sandbox-policy": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session-projection": "0.2.1-rc.2",
     "@types/node": "^22.20.1",
     "typescript": "^6.0.3",
     "vitest": "^4.1.11"

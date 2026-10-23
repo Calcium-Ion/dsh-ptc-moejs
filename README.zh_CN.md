@@ -13,23 +13,24 @@ DeepSeek Harness 的 PTC 运行时，用 Go 写的 JavaScript 引擎 moejs 运�
 
 </div>
 
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）的 PTC 模式下，模型给出一段调用工具的 TypeScript 程序。这个运行时让一个 sidecar 进程常驻，每段程序在里面拿到一个新的 [moejs](https://github.com/Calcium-Ion/moejs) 运行时。调用三次工具的程序在这里用时 0.18 ms。dsh 的 Node 运行时每段程序都要启动一个 Node 进程，同样的程序用时 95 ms。
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）的 PTC 模式下，模型给出一段调用工具的 TypeScript 程序。这个运行时让 sidecar 进程常驻，每段程序在里面拿到一个新的 [moejs](https://github.com/Calcium-Ion/moejs) 运行时。调用三次工具的程序在这里用时 0.4 ms。dsh 的 Node 运行时每段程序都要启动一个 Node 进程，同样的程序用时 110 ms。
 
-程序对机器做的每件事都是一次工具调用，dsh 按该工具自己的策略、审批和沙箱执行这次调用。运行到了截止时间就会停下，死循环里也一样，分配的内存超过预算时也会停下。sidecar 是静态链接的 Go 程序，dsh 把它当作普通子进程启动，所以在无法运行 bubblewrap 的容器里也能用。
+程序对机器做的每件事都是一次工具调用，dsh 按该工具自己的策略、审批和沙箱执行这次调用。sidecar 本身受到的限制和 dsh 的 Node 运行时给程序的一样：会话文件策略的沙箱，以及同样精简的环境变量。运行到了截止时间就会停下，死循环里也一样，分配的内存超过预算时也会停下。
 
 ## 性能
 
-两个运行时通过 dsh 的 `PtcRuntime` 服务接口运行同一段程序：三次工具调用，每次由绑定函数立即返回，最后返回一个对象。
+两个运行时挂载在 dsh 自己的服务上，通过 dsh 的 `PtcRuntime` 服务接口运行同一段程序：三次工具调用，每次由绑定函数立即返回，最后返回一个对象。
 
 | 运行时 | 每次调用 | 从加载到第一个结果 |
 |---|--:|--:|
-| dsh-ptc-moejs | 0.18 ms | 5.8 ms |
-| dsh-ptc-runtime-node，workspace-write | 94.8 ms | 131.7 ms |
-| dsh-ptc-runtime-node，danger-full-access | 91.2 ms | 135.0 ms |
+| dsh-ptc-moejs，workspace-write | 0.42 ms | 16.4 ms |
+| dsh-ptc-moejs，danger-full-access | 0.42 ms | 6.8 ms |
+| dsh-ptc-runtime-node，workspace-write | 110.4 ms | 164.4 ms |
+| dsh-ptc-runtime-node，danger-full-access | 103.0 ms | 149.2 ms |
 
-一次调用是一次 `resolve` 加一次 `run`，从程序文本到结果。从加载到第一个结果是从挂载插件到第一次运行结束，moejs 的这段时间包含启动 sidecar。workspace-write 是 dsh 会话的默认文件策略，这时 Node 运行时在 bubblewrap 里启动每段程序。danger-full-access 下直接启动。
+一次调用是一次 `resolve` 加一次 `run`，从程序文本到结果。workspace-write 是 dsh 会话的默认文件策略，这时两个运行时都在 bubblewrap 里启动进程：Node 运行时每段程序一个进程，moejs 是许多段程序共用一个 sidecar。danger-full-access 下直接启动。从加载到第一个结果是从挂载插件到第一次运行结束，moejs 的这段时间包含启动 sidecar。
 
-每一轮里，每个运行时都在新的 Node 进程中启动。5 轮交替顺序运行，绑定在 Intel Core i5-13500H 的 8 个核上，环境是 Linux 6.18、Node 24.22.1、Go 1.26.6、dsh 0.2.1-rc.2 和 moejs v0.1.0-alpha.9。表中是各轮中位数的中位数，moejs 的各轮中位数在 0.16 到 0.20 ms 之间，Node 在 90 到 96 ms 之间。
+每一轮里，每个运行时都在新的 Node 进程中启动。5 轮交替顺序运行，环境是 Intel Core i5-13500H、Linux 6.18、Node 24.22.1、Go 1.26.6、dsh 0.2.1-rc.2 和 moejs v0.1.0-alpha.9。表中是各轮中位数的中位数，moejs 的各轮中位数在 0.37 到 0.46 ms 之间，Node 在 100 到 114 ms 之间。
 
 ## 功能
 
@@ -37,9 +38,23 @@ DeepSeek Harness 的 PTC 运行时，用 Go 写的 JavaScript 引擎 moejs 运�
 
 程序能调用 dsh 提供的工具，能向 `console` 输出。读文件、执行命令、抓取网页都要调用工具，dsh 用工具流水线执行这次调用，由该工具自己的策略、审批和沙箱处理，和 Node 运行时一样。dsh 的会话日志记录每一次调用。
 
+### 和 Node 运行时一样的沙箱
+
+sidecar 受到的限制和 Node 运行时的程序进程相同：
+
+- 策略就是 dsh 为这次运行解析出来的策略：会话的文件模式和它的工作区根目录；没有会话的运行用部署的默认策略。
+- dsh 的沙箱服务用本机的 runner 限制 sidecar：Linux 上是 bubblewrap 或 Landlock，macOS 上是 Seatbelt，Windows 上是受限令牌 runner。danger-full-access 下 sidecar 直接启动，不经过 runner。
+- 受限模式在无法限制时直接失败。没有 runner 能限制 sidecar 时，运行以 `sandbox-unavailable` 失败，和 Node 运行时一样，所以在 bubblewrap 和 Landlock 都用不了的容器里要用 danger-full-access。
+- dsh 进程的环境变量里，sidecar 只保留 `PATH`、`PATHEXT`、`SYSTEMROOT`、`WINDIR`、`TEMP` 和 `TMP`，也就是 Node 运行时保留的那些，API key 不会进到 sidecar 里。
+- 会话的文件模式改变时，这个会话里按旧模式进行的运行会被停止。
+
+每个在用的文件策略有自己的 sidecar，模式和工作区根目录相同的会话共用一个。沙箱作用在 sidecar 进程上。程序自己不能访问文件、网络和进程，所以策略决定的是工具调用能做什么，而不是程序本身做什么。
+
+加了沙箱的命令由插件自己启动。dsh 的子进程服务启动 Node 运行时的进程时，在 Linux 上还会先建一个 systemd scope、经过一个 Node 引导进程，用来回收程序留下的子进程。这会让每次启动多花约 80 ms，而 sidecar 不会启动子进程。sidecar 总是运行在运行 dsh 的这台机器上：执行环境在另一台机器上的部署（例如通过 SSH）里，受限模式会以 `sandbox-unavailable` 失败。
+
 ### 每次运行一个新运行时
 
-sidecar 在插件加载时启动，之后一直运行。每次运行拿到自己的 moejs 运行时，每段程序都从干净的全局环境开始，同一个 sidecar 里可以同时进行多次运行。
+默认策略的 sidecar 在插件加载时启动，每个 sidecar 在两段程序之间一直运行。连续五分钟没有运行时它会退出，下一次运行再启动。每次运行拿到自己的 moejs 运行时，每段程序都从干净的全局环境开始，同一个 sidecar 里可以同时进行多次运行。
 
 ### 每次运行都有上限
 
@@ -51,13 +66,13 @@ sidecar 在插件加载时启动，之后一直运行。每次运行拿到自己
 
 ### 一个静态程序
 
-sidecar 是用 `CGO_ENABLED=0` 构建的自包含 Go 程序。dsh 把它当作普通子进程启动，运行时对宿主机的要求就是能启动这个进程。包管理器以可选依赖的形式安装对应平台的程序。
+sidecar 是用 `CGO_ENABLED=0` 构建的自包含 Go 程序。包管理器以可选依赖的形式安装对应平台的程序。
 
 ## 和 Node 运行时的区别
 
 程序能用 JavaScript 标准库和工具。`require`、`import`、`process`、`Buffer`、`fs` 和 `setTimeout` 在程序里都是 undefined，程序要读文件时调用 `read` 工具。如果你的程序要用 Node API，这个 profile 继续用 dsh 的 Node 运行时。
 
-程序的每次文件访问都发生在工具调用里，带 `sandbox_permissions` 的 `run_code` 调用会被 dsh 拒绝。文件沙箱拒绝某次工具调用时，程序在这次调用的参数里带上 `sandbox_permissions` 和 `justification` 重试，每次这样的调用都要你批准。用 Node 运行时的话，程序通过 Node API 自己做的文件操作还能用一次批准全部放行。
+`run_code` 和在 Node 运行时上一样接受 `sandbox_permissions` 和 `justification`，批准后程序在放宽模式的 sidecar 里运行。程序自己不做文件访问，所以这次批准不会让它多做任何事。文件沙箱拒绝某次工具调用时，程序在这次调用的参数里带上 `sandbox_permissions` 和 `justification` 重试，每次这样的调用都要你批准。用 Node 运行时的话，对 `run_code` 的批准还会放行程序通过 Node API 自己做的文件操作。
 
 ## 快速上手
 
@@ -124,11 +139,14 @@ return { head: head.stdout?.text };
 |---|---|
 | `exception` | 程序抛出异常、有语法错误，或者用了会改变运行行为的 TypeScript，例如 `enum`。 |
 | `timeout` | 超过截止时间，或者分配的内存超过 `memoryLimitMb`。 |
-| `abort` | dsh 取消了这次运行，或者 profile 关闭了运行时。 |
+| `abort` | dsh 取消了这次运行、profile 关闭了运行时，或者会话的文件模式改变了。 |
 | `invalid-output` | 返回值不是无损 JSON。 |
 | `output-limit` | 返回值大于 `maxValueBytes`。 |
 | `protocol` | 同时进行中的工具调用超过 `maxPendingCalls`，或者 sidecar 发来了格式错误的消息。 |
-| `worker-exit` | sidecar 进程退出了。下一次运行会启动新的进程。 |
+| `sandbox-unavailable` | 文件模式需要沙箱，但本机没有 runner 能限制 sidecar，或者 runner 在 sidecar 运行之前就失败了。 |
+| `worker-exit` | sidecar 进程退出了或者没能启动。下一次运行会启动新的进程。 |
+
+和 Node 运行时一样，结果里还带有 sidecar 所在沙箱的情况：模式，以及受限模式下 runner 是完整还是部分执行了这个模式。
 
 ## 限制
 
@@ -138,6 +156,7 @@ return { head: head.stdout?.text };
 - `console` 的输出仿照 Node 的 `util.inspect`，覆盖字符串、数字、普通对象、数组、`Map`、`Set`、错误和类的实例，单行超过 72 个字符时换行。
 - moejs 的中断作用于正在运行的 JavaScript，编译一旦开始会一直进行到结束。解析很慢的程序到截止时间时，dsh 一侧照常结束这次运行，sidecar 等解析返回后丢弃它。
 - 程序没有 await 的工具调用如果失败，这个失败只留在那个没人读取的 promise 里。
+- dsh 的 workflow 工具用 `import()` 加载它的程序，这个运行时没有 `import()`，所以 workflow 要用 Node 运行时。
 - CI 每次推送都在 Linux x64、Linux arm64、macOS arm64 和 Windows x64 上跑测试。macOS x64 还没测过，它的程序由同一份源码交叉编译。
 
 ## 开发
@@ -146,14 +165,14 @@ return { head: head.stdout?.text };
 pnpm install
 pnpm run build:sidecar   # 为本机构建 sidecar，放到 npm/<package>/bin
 pnpm run build           # lib/
-pnpm test                # 单元测试，以及针对 sidecar 的行为测试
+pnpm test                # 单元测试，以及在 dsh 自己的服务上针对 sidecar 的行为测试
 go test ./...            # sidecar 的 Go 测试
 DSH_REPO=/path/to/deepseek-harness pnpm run e2e     # 用 dsh 的 mock LLM 跑 headless dsh
 DSH_REPO=/path/to/deepseek-harness pnpm run bench   # 上面的测量
 pnpm run build:binaries  # 五个平台的程序
 ```
 
-构建 sidecar 需要 Go 1.25 或更新版本，使用 `CGO_ENABLED=0`。`DSH_REPO` 是执行过 `pnpm install` 和 `pnpm run build` 的 dsh 源码目录。端到端测试用 `dsh plugin add` 把这个目录装进临时 profile，跑一个 headless 任务，让 mock 模型调用 `run_code`，再和 Node 运行时跑同一任务的会话日志做比较。
+构建 sidecar 需要 Go 1.25 或更新版本，使用 `CGO_ENABLED=0`。测试挂载 dsh 的 fs、沙箱和策略包，本机有可用的 runner 时，其中一个测试会在本机沙箱里运行程序。`DSH_REPO` 是执行过 `pnpm install` 和 `pnpm run build` 的 dsh 源码目录。端到端测试用 `dsh plugin add` 把这个目录装进临时 profile，跑一个 headless 任务，让 mock 模型调用 `run_code`，再和 Node 运行时跑同一任务的会话日志做比较，包括提供给模型的 `run_code` 参数。
 
 ## 许可证
 

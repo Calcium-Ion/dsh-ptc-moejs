@@ -3,22 +3,27 @@
  * provider: budgets, deadlines and aborts, disposal, lossless JSON in both
  * directions, binding names and a crashed sidecar.
  */
-import type { ChildProcess } from 'node:child_process'
-import { Context } from '@deepseek-ai/cordis'
 import type { PtcBindingFunction, PtcBindingNamespace, PtcRunRequest } from '@deepseek-ai/dsh-ptc-runtime'
-import { describe, expect, it, onTestFinished } from 'vitest'
-import MoejsPtcRuntime from '../src/index.ts'
+import { describe, expect, it } from 'vitest'
 import type { Config } from '../src/index.ts'
 import { LogLedger } from '../src/protocol.ts'
+import { internals, mountRuntime, sidecarProcess } from './setup.ts'
 
 async function setup(config: Config = {}) {
-  const ctx = new Context()
-  const fiber = await ctx.plugin(MoejsPtcRuntime, config)
-  onTestFinished(async () => { await ctx.fiber.dispose() })
-  const runtime = ctx.ptcRuntime as MoejsPtcRuntime
-  const run = (request: PtcRunRequest) => runtime.run(runtime.resolve(request))
-  const sidecar = () => (runtime as unknown as { sidecar: { child?: ChildProcess } }).sidecar.child
+  const { ctx, fiber, runtime } = await mountRuntime(config)
+  // The sandbox facts of a result have their own suite.
+  const run = async (request: PtcRunRequest) => {
+    const { sandbox: _sandbox, ...result } = await runtime.run(runtime.resolve(request))
+    return result
+  }
+  const sidecar = () => sidecarProcess(runtime)
   return { ctx, fiber, runtime, run, sidecar }
+}
+
+/** Whether a process has exited within a short wait. */
+async function exited(handle: { done: Promise<unknown> }): Promise<boolean> {
+  const timeout = new Promise<false>((resolve) => { setTimeout(() => { resolve(false) }, 1_000) })
+  return await Promise.race([handle.done.then(() => true, () => true), timeout])
 }
 
 function tools(functions: Record<string, PtcBindingFunction>, errorClass = true): PtcBindingNamespace[] {
@@ -298,7 +303,7 @@ describe('the sidecar', () => {
     await fiber.dispose()
     expect(await looping).toEqual({ logs: [], error: { kind: 'abort', message: 'runtime disposed' } })
     expect(await waiting).toEqual({ logs: [], error: { kind: 'abort', message: 'runtime disposed' } })
-    expect(child.exitCode !== null || child.signalCode !== null).toBe(true)
+    expect(await exited(child)).toBe(true)
   })
 
   it('reports a crashed sidecar as worker-exit and starts a new one', async () => {
@@ -308,22 +313,23 @@ describe('the sidecar', () => {
     const pending = run({ program: 'await tools.wait({})', bindings: tools({ wait: () => { called(); return never({}) } }) })
     await reached
     const first = sidecar()!
-    first.kill('SIGKILL')
+    first.terminate()
     const result = await pending
     expect(result.error?.kind).toBe('worker-exit')
-    expect(result.error?.message).toBe('the moejs sidecar exited on signal SIGKILL')
+    expect(result.error?.message).toMatch(/^the moejs sidecar exited /)
     expect(await run({ program: 'return "recovered"', bindings: [] })).toEqual({ logs: [], value: 'recovered' })
     expect(sidecar()).not.toBe(first)
   })
 
   it('reports a sidecar that cannot start as worker-exit', async () => {
-    const { runtime, run } = await setup()
-    const internal = runtime as unknown as { sidecar: { binary: string; child?: ChildProcess } }
-    internal.sidecar.child?.kill('SIGKILL')
-    await new Promise(resolve => setTimeout(resolve, 100))
-    internal.sidecar.binary = '/nonexistent/moejs-ptc'
+    const { runtime, run, sidecar } = await setup()
+    await run({ program: 'return 1', bindings: [] })
+    const first = sidecar()!
+    first.terminate()
+    await first.done
+    internals(runtime).binary = '/nonexistent/moejs-ptc'
     const result = await run({ program: 'return 1', bindings: [] })
     expect(result.error?.kind).toBe('worker-exit')
-    expect(result.error?.message).toContain('the moejs sidecar could not run')
+    expect(result.error?.message).toContain('/nonexistent/moejs-ptc')
   })
 })

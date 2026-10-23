@@ -13,23 +13,24 @@ A PTC runtime for the DeepSeek Harness that runs the model's programs in moejs, 
 
 </div>
 
-In the PTC mode of the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh), the model answers with a TypeScript program that calls tools. This runtime runs each program in a fresh [moejs](https://github.com/Calcium-Ion/moejs) runtime inside one sidecar process that stays up between programs. A program with three tool calls takes 0.18 ms here, and 95 ms on dsh's Node runtime, which starts a Node process for every program.
+In the PTC mode of the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh), the model answers with a TypeScript program that calls tools. This runtime runs each program in a fresh [moejs](https://github.com/Calcium-Ion/moejs) runtime inside a sidecar process that stays up between programs. A program with three tool calls takes 0.4 ms here, and 110 ms on dsh's Node runtime, which starts a Node process for every program.
 
-Everything a program does to the machine is a tool call, which dsh runs with that tool's own policy, approvals and sandbox. A run stops at its deadline, even in an endless loop, and when it goes past its memory budget. The sidecar is a static Go binary that dsh starts as a plain child process, so the runtime also works in containers where bubblewrap cannot run.
+Everything a program does to the machine is a tool call, which dsh runs with that tool's own policy, approvals and sandbox. The sidecar itself gets the confinement dsh's Node runtime gives a program: the file sandbox of the Session's policy and the same short environment. A run stops at its deadline, even in an endless loop, and when it goes past its memory budget.
 
 ## Performance
 
-Both runtimes ran the same program through dsh's `PtcRuntime` service API: three tool calls, each answered at once by its binding, and a returned object.
+Both runtimes ran the same program through dsh's `PtcRuntime` service API, mounted on dsh's own services: three tool calls, each answered at once by its binding, and a returned object.
 
 | Runtime | Per call | Load to first result |
 |---|--:|--:|
-| dsh-ptc-moejs | 0.18 ms | 5.8 ms |
-| dsh-ptc-runtime-node, workspace-write | 94.8 ms | 131.7 ms |
-| dsh-ptc-runtime-node, danger-full-access | 91.2 ms | 135.0 ms |
+| dsh-ptc-moejs, workspace-write | 0.42 ms | 16.4 ms |
+| dsh-ptc-moejs, danger-full-access | 0.42 ms | 6.8 ms |
+| dsh-ptc-runtime-node, workspace-write | 110.4 ms | 164.4 ms |
+| dsh-ptc-runtime-node, danger-full-access | 103.0 ms | 149.2 ms |
 
-A call is one `resolve` and `run`, from the program text to the result. Load to first result runs from mounting the plugin to the end of its first run, and for moejs it includes starting the sidecar. Workspace-write is the default file policy of a dsh Session, under which the Node runtime starts each program inside bubblewrap. Danger-full-access starts it directly.
+A call is one `resolve` and `run`, from the program text to the result. Workspace-write is the default file policy of a dsh Session, under which both runtimes start their process inside bubblewrap: the Node runtime one process per program, moejs one sidecar for many programs. Danger-full-access starts the process directly. Load to first result runs from mounting the plugin to the end of its first run, and for moejs it includes starting the sidecar.
 
-Every round started each runtime in a fresh Node process. The 5 rounds alternated the order of the runtimes on 8 cores of an Intel Core i5-13500H, with Linux 6.18, Node 24.22.1, Go 1.26.6, dsh 0.2.1-rc.2 and moejs v0.1.0-alpha.9. The table gives the median of the round medians, which stayed within 0.16 to 0.20 ms for moejs and within 90 to 96 ms for Node.
+Every round started each runtime in a fresh Node process. The 5 rounds alternated the order of the runtimes on an Intel Core i5-13500H, with Linux 6.18, Node 24.22.1, Go 1.26.6, dsh 0.2.1-rc.2 and moejs v0.1.0-alpha.9. The table gives the median of the round medians, which stayed within 0.37 to 0.46 ms for moejs and within 100 to 114 ms for Node.
 
 ## Features
 
@@ -37,9 +38,23 @@ Every round started each runtime in a fresh Node process. The 5 rounds alternate
 
 A program can call the tools dsh gives it and write to `console`. To read a file, run a command or fetch a page, it calls a tool, and dsh runs that call through its tool pipeline with the tool's own policy, approvals and sandbox, as it does for the Node runtime. dsh's session log records each call.
 
+### The Node runtime's sandbox
+
+The sidecar runs under the same confinement as the Node runtime's program process:
+
+- The policy is the one dsh resolves for the run: the Session's file mode and its workspace root, or the deployment's default for a run without a Session.
+- dsh's sandbox service confines the sidecar with its runner for the host: bubblewrap or Landlock on Linux, Seatbelt on macOS, the restricted-token runner on Windows. Danger-full-access starts the sidecar without one.
+- A restricted mode fails closed. When no runner can confine the sidecar, the run fails with `sandbox-unavailable`, as it does on the Node runtime, so a container where neither bubblewrap nor Landlock works needs danger-full-access.
+- Of the dsh process's environment, the sidecar keeps only `PATH`, `PATHEXT`, `SYSTEMROOT`, `WINDIR`, `TEMP` and `TMP`, the variables the Node runtime keeps, so API keys stay out of it.
+- A change of a Session's file mode stops that Session's runs under the old mode.
+
+Each file policy in use has its own sidecar, which Sessions with the same mode and workspace root share. The sandbox applies to the sidecar process. The program has no file, network or process access of its own, so the policy decides what a tool call may do, not what the program does.
+
+The plugin starts the sandboxed command itself. dsh's subprocess service, which starts the Node runtime's processes, also puts each one in a systemd scope behind a Node bootstrap on Linux, so that it can reap the child processes a program leaves behind. That adds about 80 ms to a start, and the sidecar starts no child processes. The sidecar always runs on the host that runs dsh: in a deployment whose execution world is another host, such as one over SSH, a restricted mode fails with `sandbox-unavailable`.
+
 ### A fresh runtime for every run
 
-The sidecar starts when the plugin loads and keeps running. Each run gets its own moejs runtime, so every program starts from clean globals, and one sidecar can have several runs in flight at once.
+The sidecar of the default policy starts when the plugin loads, and each sidecar keeps running between programs. It exits after five minutes without runs, and the next run starts it again. Each run gets its own moejs runtime, so every program starts from clean globals, and one sidecar can have several runs in flight at once.
 
 ### Limits on every run
 
@@ -51,13 +66,13 @@ Programs are TypeScript with erasable syntax, the rule dsh's Node runtime applie
 
 ### One static binary
 
-The sidecar is a self-contained Go binary built with `CGO_ENABLED=0`. dsh starts it as a plain child process, and starting that process is all the runtime asks of the host. The package manager installs the binary for your platform as an optional dependency.
+The sidecar is a self-contained Go binary built with `CGO_ENABLED=0`. The package manager installs the binary for your platform as an optional dependency.
 
 ## Differences from the Node runtime
 
 Programs get the JavaScript standard library and the tools. `require`, `import`, `process`, `Buffer`, `fs` and `setTimeout` are undefined in a program, and a program that needs a file asks the `read` tool for it. If your programs use Node APIs, keep dsh's Node runtime for that profile.
 
-Every file access of a program happens inside a tool call, and dsh rejects a `run_code` call that carries `sandbox_permissions`. When the file sandbox denies a tool call, the program retries that call with `sandbox_permissions` and `justification` among its arguments, and you approve each such call. On the Node runtime, one approval can also cover the file operations a program does itself through Node APIs.
+`run_code` takes `sandbox_permissions` and `justification` as it does on the Node runtime, and an approved request runs the program in a sidecar under the wider mode. The program does no file access of its own, so that approval lets it do nothing more. When the file sandbox denies a tool call, the program retries that call with `sandbox_permissions` and `justification` among its arguments, and you approve each such call. On the Node runtime, an approval for `run_code` also covers the file operations a program does itself through Node APIs.
 
 ## Quick start
 
@@ -124,11 +139,14 @@ The returned value goes back to dsh as lossless JSON: plain objects, arrays, str
 |---|---|
 | `exception` | The program throws, has a syntax error, or uses TypeScript that changes run-time behaviour, such as `enum`. |
 | `timeout` | The deadline passes, or the program allocates more than `memoryLimitMb`. |
-| `abort` | dsh cancels the run, or the profile shuts the runtime down. |
+| `abort` | dsh cancels the run, the profile shuts the runtime down, or the Session's file mode changes. |
 | `invalid-output` | The returned value is not lossless JSON. |
 | `output-limit` | The returned value is larger than `maxValueBytes`. |
 | `protocol` | More than `maxPendingCalls` tool calls are in flight, or the sidecar sent a malformed message. |
-| `worker-exit` | The sidecar process died. The next run starts a new one. |
+| `sandbox-unavailable` | The file mode needs a sandbox and no runner on this host can confine the sidecar, or the runner failed before the sidecar ran. |
+| `worker-exit` | The sidecar process died or could not start. The next run starts a new one. |
+
+A result also carries the facts of the sandbox the sidecar ran in, as on the Node runtime: the mode and, under a restricted mode, whether the runner enforces it fully or in part.
 
 ## Limitations
 
@@ -138,6 +156,7 @@ The returned value goes back to dsh as lossless JSON: plain objects, arrays, str
 - `console` output imitates Node's `util.inspect` for strings, numbers, plain objects, arrays, `Map`, `Set`, errors and class instances, and breaks a line at 72 characters.
 - moejs interrupts running JavaScript, and a compile runs to its end once it starts. A program that takes long to parse still ends at its deadline for dsh, and the sidecar drops the run once the parse returns.
 - If a tool call that the program never awaits fails, the failure stays in that unread promise.
+- dsh's workflow tool loads its program with `import()`, which this runtime does not have, so workflows need the Node runtime.
 - CI runs the tests on Linux x64, Linux arm64, macOS arm64 and Windows x64 for every push. macOS x64 is untested: its binary is cross-compiled from the same source.
 
 ## Development
@@ -146,14 +165,14 @@ The returned value goes back to dsh as lossless JSON: plain objects, arrays, str
 pnpm install
 pnpm run build:sidecar   # the sidecar for this machine, into npm/<package>/bin
 pnpm run build           # lib/
-pnpm test                # unit tests and the behaviour suite against the sidecar
+pnpm test                # unit tests and the behaviour suite against the sidecar, on dsh's own services
 go test ./...            # the sidecar's Go tests
 DSH_REPO=/path/to/deepseek-harness pnpm run e2e     # headless dsh with dsh's mock LLM
 DSH_REPO=/path/to/deepseek-harness pnpm run bench   # the measurements above
 pnpm run build:binaries  # all five platform binaries
 ```
 
-Building the sidecar takes Go 1.25 or later, with `CGO_ENABLED=0`. `DSH_REPO` is a dsh checkout after `pnpm install` and `pnpm run build`. The e2e test installs this checkout into a temporary profile with `dsh plugin add`, runs one headless task in which the mock model calls `run_code`, and compares the Session log with the same task on the Node runtime.
+Building the sidecar takes Go 1.25 or later, with `CGO_ENABLED=0`. The tests mount dsh's fs, sandbox and policy packages, and one of them runs a program under this host's sandbox when a runner is usable. `DSH_REPO` is a dsh checkout after `pnpm install` and `pnpm run build`. The e2e test installs this checkout into a temporary profile with `dsh plugin add`, runs one headless task in which the mock model calls `run_code`, and compares the Session log, with the `run_code` parameters the model was offered, against the same task on the Node runtime.
 
 ## License
 
