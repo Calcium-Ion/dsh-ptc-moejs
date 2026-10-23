@@ -51,6 +51,8 @@
     "e2e": "node e2e/run.mjs",
     "bench": "node bench/bench.mjs",
     "bench:agent": "node bench/agent.mjs",
+    "bench:features": "node bench/features.mjs",
+    "compare": "node e2e/compare.mjs",
     "prepack": "pnpm run build"
   },
   "peerDependencies": {

@@ -244,10 +244,12 @@ go test ./...            # sidecar 的 Go 测试
 DSH_REPO=/path/to/deepseek-harness pnpm run e2e     # 用 dsh 的 mock LLM 跑 headless dsh
 DSH_REPO=/path/to/deepseek-harness pnpm run bench   # 上面的测量
 DSH_REPO=/path/to/deepseek-harness pnpm run bench:agent   # 长对话测评，需要 Linux
+DSH_REPO=/path/to/deepseek-harness pnpm run bench:features   # 在两个运行时上测定时器、模块和 dsh 的 workflow guest
+DSH_REPO=/path/to/deepseek-harness pnpm run compare  # 在两个运行时上跑同样的程序，列出不同之处
 pnpm run build:binaries  # 五个平台的程序
 ```
 
-构建 sidecar 需要 Go 1.25 或更新版本，使用 `CGO_ENABLED=0`。测试挂载 dsh 的 fs、沙箱和策略包，本机有可用的 runner 时，其中一个测试会在本机沙箱里运行程序。`DSH_REPO` 是执行过 `pnpm install` 和 `pnpm run build` 的 dsh 源码目录。端到端测试用 `dsh plugin add` 把这个目录装进临时 profile，跑一个 headless 任务，让 mock 模型调用 `run_code`，再和 Node 运行时跑同一任务的会话日志做比较，包括提供给模型的 `run_code` 参数。
+构建 sidecar 需要 Go 1.25 或更新版本，使用 `CGO_ENABLED=0`。测试挂载 dsh 的 fs、沙箱和策略包，本机有可用的 runner 时，其中一个测试会在本机沙箱里运行程序。`DSH_REPO` 是执行过 `pnpm install` 和 `pnpm run build` 的 dsh 源码目录。端到端测试用 `dsh plugin add` 把这个目录装进临时 profile，跑一个 headless 任务，让 mock 模型调用 `run_code`，再和 Node 运行时跑同一任务的会话日志做比较，包括提供给模型的 `run_code` 参数。`compare` 在这个运行时和 Node 运行时上各跑约一百段程序，用 Markdown 报告列出两边日志、返回值和失败的不同之处。
 
 ## 许可证
 

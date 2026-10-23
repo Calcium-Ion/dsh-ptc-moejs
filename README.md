@@ -244,10 +244,12 @@ go test ./...            # the sidecar's Go tests
 DSH_REPO=/path/to/deepseek-harness pnpm run e2e     # headless dsh with dsh's mock LLM
 DSH_REPO=/path/to/deepseek-harness pnpm run bench   # the measurements above
 DSH_REPO=/path/to/deepseek-harness pnpm run bench:agent   # the long conversation, on Linux
+DSH_REPO=/path/to/deepseek-harness pnpm run bench:features   # timers, modules and dsh's workflow guest on both runtimes
+DSH_REPO=/path/to/deepseek-harness pnpm run compare  # the same programs on both runtimes, and where they differ
 pnpm run build:binaries  # all five platform binaries
 ```
 
-Building the sidecar takes Go 1.25 or later, with `CGO_ENABLED=0`. The tests mount dsh's fs, sandbox and policy packages, and one of them runs a program under this host's sandbox when a runner is usable. `DSH_REPO` is a dsh checkout after `pnpm install` and `pnpm run build`. The e2e test installs this checkout into a temporary profile with `dsh plugin add`, runs one headless task in which the mock model calls `run_code`, and compares the Session log, with the `run_code` parameters the model was offered, against the same task on the Node runtime.
+Building the sidecar takes Go 1.25 or later, with `CGO_ENABLED=0`. The tests mount dsh's fs, sandbox and policy packages, and one of them runs a program under this host's sandbox when a runner is usable. `DSH_REPO` is a dsh checkout after `pnpm install` and `pnpm run build`. The e2e test installs this checkout into a temporary profile with `dsh plugin add`, runs one headless task in which the mock model calls `run_code`, and compares the Session log, with the `run_code` parameters the model was offered, against the same task on the Node runtime. `compare` runs about a hundred programs on this runtime and on the Node runtime and prints a Markdown report of where their logs, values and failures differ.
 
 ## License
 
