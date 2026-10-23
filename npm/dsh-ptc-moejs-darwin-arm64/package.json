@@ -1,6 +1,6 @@
 {
   "name": "dsh-ptc-moejs-darwin-arm64",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "The darwin-arm64 sidecar binary of dsh-ptc-moejs",
   "license": "MIT AND Apache-2.0 AND BSD-3-Clause",
   "repository": {
