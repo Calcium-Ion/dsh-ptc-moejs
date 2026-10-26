@@ -76,7 +76,7 @@ sidecar 受到的限制和 Node 运行时的程序进程相同：
 - 策略就是 dsh 为这次运行解析出来的策略：会话的文件模式和它的工作区根目录；没有会话的运行用部署的默认策略。
 - dsh 的沙箱服务用本机的 runner 限制 sidecar：Linux 上是 bubblewrap 或 Landlock，macOS 上是 Seatbelt，Windows 上是受限令牌 runner。danger-full-access 下 sidecar 直接启动，不经过 runner。
 - 受限模式在无法限制时直接失败。没有 runner 能限制 sidecar 时，运行以 `sandbox-unavailable` 失败，和 Node 运行时一样，所以在 bubblewrap 和 Landlock 都用不了的容器里要用 danger-full-access。
-- dsh 进程的环境变量里，sidecar 只保留 `PATH`、`PATHEXT`、`SYSTEMROOT`、`WINDIR`、`TEMP` 和 `TMP`，也就是 Node 运行时保留的那些，API key 不会进到 sidecar 里。
+- dsh 进程的环境变量里，sidecar 只保留 `PATH`、`PATHEXT`、`SYSTEMROOT`、`WINDIR`、`TEMP` 和 `TMP`，也就是 Node 运行时保留的那些，另外保留 `ELECTRON_RUN_AS_NODE`，这样 dsh 桌面版的 Electron 才能运行 Windows 沙箱 runner。API key 不会进到 sidecar 里。
 - 会话的文件模式改变时，这个会话里按旧模式进行的运行会被停止。
 
 在 Linux 上，插件自己打开 sidecar 的二进制文件，加了沙箱的 sidecar 从这个打开的文件运行，所以即使沙箱藏起了二进制所在的目录（比如 workspace-write 下 bubblewrap 会把 /tmp 换成空目录），sidecar 也能启动。这样的 sidecar 在 `ps` 里显示为 `/proc/self/fd/3`。

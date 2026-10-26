@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { binaryPackage, resolveBinary } from '../src/binary.ts'
 import { resolveConfig, validateBindings } from '../src/index.ts'
 import type { Config } from '../src/index.ts'
+import { sidecarEnvironment } from '../src/launch.ts'
 import { LogLedger, TRUNCATION_MARKER, capMessage, failureResult, jsonBytes, parseFrame, successResult } from '../src/protocol.ts'
 import { mountRuntime } from './setup.ts'
 
@@ -268,5 +269,18 @@ describe('resolveBinary', () => {
   it('names the Windows package windows-x64', () => {
     expect(binaryPackage('win32', 'x64')).toBe('dsh-ptc-moejs-windows-x64')
     expect(binaryPackage('linux', 'arm64')).toBe('dsh-ptc-moejs-linux-arm64')
+  })
+})
+
+describe('sidecarEnvironment', () => {
+  it('keeps ELECTRON_RUN_AS_NODE regardless of key case and drops unrelated variables', () => {
+    const env = sidecarEnvironment({
+      PATH: '/usr/bin',
+      Electron_Run_As_Node: '1',
+      TMP: '/tmp/kept',
+      DSH_PTC_MOEJS_TEST_SECRET: 'secret',
+      NODE_OPTIONS: '--inspect',
+    })
+    expect(env).toEqual({ PATH: '/usr/bin', Electron_Run_As_Node: '1', TMP: '/tmp/kept' })
   })
 })

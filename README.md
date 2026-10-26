@@ -76,7 +76,7 @@ The sidecar runs under the same confinement as the Node runtime's program proces
 - The policy is the one dsh resolves for the run: the Session's file mode and its workspace root, or the deployment's default for a run without a Session.
 - dsh's sandbox service confines the sidecar with its runner for the host: bubblewrap or Landlock on Linux, Seatbelt on macOS, the restricted-token runner on Windows. Danger-full-access starts the sidecar without one.
 - A restricted mode fails closed. When no runner can confine the sidecar, the run fails with `sandbox-unavailable`, as it does on the Node runtime, so a container where neither bubblewrap nor Landlock works needs danger-full-access.
-- Of the dsh process's environment, the sidecar keeps only `PATH`, `PATHEXT`, `SYSTEMROOT`, `WINDIR`, `TEMP` and `TMP`, the variables the Node runtime keeps, so API keys stay out of it.
+- Of the dsh process's environment, the sidecar keeps only `PATH`, `PATHEXT`, `SYSTEMROOT`, `WINDIR`, `TEMP` and `TMP`, the variables the Node runtime keeps, and `ELECTRON_RUN_AS_NODE`, so dsh Desktop's Electron can run the Windows sandbox runner. API keys stay out of it.
 - A change of a Session's file mode stops that Session's runs under the old mode.
 
 On Linux the plugin opens the sidecar's binary itself and the sandboxed sidecar runs from that open file, so it starts even where the sandbox hides the binary's directory, as bubblewrap hides /tmp under workspace-write. `ps` lists such a sidecar as `/proc/self/fd/3`.

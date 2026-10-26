@@ -1,11 +1,11 @@
 /**
  * Starts the sidecar under the confinement dsh's Node runtime gives its
  * program process: `ctx.sandbox` wraps it for the resolved file policy, and
- * its environment keeps only the variables the Node runtime keeps. The host
- * spawns the wrapped command itself. dsh's subprocess service would also put
- * it in a systemd scope behind a Node bootstrap, about 80 ms a start on
- * Linux, to reap the child processes of a program, and the sidecar starts
- * none.
+ * its environment keeps the startup variables the Node runtime keeps, plus
+ * Electron's Node-mode selector. The host spawns the wrapped command itself.
+ * dsh's subprocess service would also put it in a systemd scope behind a
+ * Node bootstrap, about 80 ms a start on Linux, to reap the child processes
+ * of a program, and the sidecar starts none.
  * @module dsh-ptc-moejs/launch
  */
 
@@ -23,6 +23,15 @@ import type { Launch, SidecarProcess } from './sidecar.ts'
 export const STARTUP_ENVIRONMENT_NAMES: ReadonlySet<string> = new Set(['PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP'])
 
 /**
+ * Electron's Node-mode selector, kept for the sandbox runner. On dsh Desktop
+ * the Windows runner is `[process.execPath, runner.js, ...]`, and
+ * `process.execPath` is Electron, which runs `runner.js` only while this
+ * variable is set. dsh's Node runtime keeps it until bootstrap for the same
+ * reason.
+ */
+export const RUNNER_ENVIRONMENT_NAMES: ReadonlySet<string> = new Set(['ELECTRON_RUN_AS_NODE'])
+
+/**
  * Where a confined sidecar finds its binary on Linux: the descriptor the host
  * opened it on. A sandbox can hide the binary's directory, as bubblewrap
  * hides /tmp under workspace-write, and the descriptor still reaches it.
@@ -30,12 +39,16 @@ export const STARTUP_ENVIRONMENT_NAMES: ReadonlySet<string> = new Set(['PATH', '
 export const BINARY_DESCRIPTOR_PATH = '/proc/self/fd/3'
 
 /**
- * The sidecar's environment: the startup variables of the host's environment and nothing else.
+ * The sidecar's environment: the host's startup variables and Electron's
+ * Node-mode selector, and nothing else.
  * @param env - the host's environment.
  * @returns the entries the sidecar keeps.
  */
 export function sidecarEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(env).filter(([key]) => STARTUP_ENVIRONMENT_NAMES.has(key.toUpperCase())))
+  return Object.fromEntries(Object.entries(env).filter(([key]) => {
+    const name = key.toUpperCase()
+    return STARTUP_ENVIRONMENT_NAMES.has(name) || RUNNER_ENVIRONMENT_NAMES.has(name)
+  }))
 }
 
 function sandboxUnavailable(error: unknown): boolean {

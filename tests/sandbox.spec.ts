@@ -109,10 +109,14 @@ describe('launch', () => {
     const root = await workspace()
     vi.stubEnv('DSH_PTC_MOEJS_TEST_SECRET', 'secret')
     vi.stubEnv('TMP', '/tmp/kept')
+    vi.stubEnv('ELECTRON_RUN_AS_NODE', '1')
     onTestFinished(() => { vi.unstubAllEnvs() })
     const env = sidecarEnvironment()
     expect(env.TMP).toBe('/tmp/kept')
-    expect(Object.keys(env).every(name => ['PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP'].includes(name.toUpperCase()))).toBe(true)
+    expect(env.ELECTRON_RUN_AS_NODE).toBe('1')
+    expect(env.DSH_PTC_MOEJS_TEST_SECRET).toBeUndefined()
+    const kept = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'ELECTRON_RUN_AS_NODE']
+    expect(Object.keys(env).every(name => kept.includes(name.toUpperCase()))).toBe(true)
 
     const { run } = await setup()
     await run({ program: 'return 1', bindings: [], sandboxPolicy: { mode: 'workspace-write', workspaceRoot: root } })
